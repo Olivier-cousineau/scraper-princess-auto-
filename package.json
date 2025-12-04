@@ -1,0 +1,13 @@
+{
+  "name": "scraper-princess-auto",
+  "version": "1.0.0",
+  "description": "Scripts pour récupérer les soldes Princess Auto.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "scrape": "node scripts/scrape_princessauto_clearance_all_stores.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}
