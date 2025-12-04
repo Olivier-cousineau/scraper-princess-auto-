@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "scrape": "node scripts/scrape_princessauto_clearance_all_stores.mjs"
+    "scrape": "npm run scrape:princessauto",
+    "scrape:princessauto": "node scripts/scrape_princessauto_clearance_all_stores.mjs"
   },
   "dependencies": {
     "playwright": "^1.45.0"

@@ -5,12 +5,11 @@ import { chromium } from "playwright";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, "..");
 
-// URL de base pour les soldes / liquidation Princess Auto.
-// À ajuster si tu trouves une meilleure URL dédiée "Clearance".
-const CLEARANCE_URL = "https://www.princessauto.com/en/category/Sale";
+// URL clearance globale. Ajuste si Princess Auto change son routage.
+const CLEARANCE_URL = "https://www.princessauto.com/en/clearance";
 
-const ROOT_DIR = path.join(__dirname, "..");
 const STORES_JSON = path.join(
   ROOT_DIR,
   "data",
@@ -19,16 +18,16 @@ const STORES_JSON = path.join(
 );
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 
-/**
- * Pause simple
- */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Charge la liste complète des magasins depuis le JSON
- */
+function ensureOutputsRoot() {
+  if (!fs.existsSync(OUTPUT_ROOT)) {
+    fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
+  }
+}
+
 function loadStores() {
   if (!fs.existsSync(STORES_JSON)) {
     throw new Error(`Stores JSON not found at: ${STORES_JSON}`);
@@ -41,10 +40,6 @@ function loadStores() {
   return parsed;
 }
 
-/**
- * Retourne les magasins à traiter sur CE shard.
- * SHARD_INDEX et SHARD_TOTAL viennent des variables d'env (workflow matrix).
- */
 function getStoresForThisShard(allStores) {
   const shardTotal = Number(process.env.SHARD_TOTAL ?? "1");
   const shardIndex = Number(process.env.SHARD_INDEX ?? "0");
@@ -67,106 +62,100 @@ function getStoresForThisShard(allStores) {
   return selected;
 }
 
-/**
- * Charge la page de soldes / liquidation
- */
 async function loadClearancePage(page) {
   console.log(`➡️ Ouverture de la page de soldes: ${CLEARANCE_URL}`);
   await page.goto(CLEARANCE_URL, { waitUntil: "networkidle" });
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(3000);
 
-  // Scroll progressif pour charger tous les produits
+  // Scroll progressif pour charger les produits ou déclencher un éventuel infinite scroll.
   console.log("↕️ Scroll vers le bas pour charger un max de produits...");
   let previousHeight = 0;
-  for (let i = 0; i < 15; i++) {
-    const currentHeight = await page.evaluate(() => {
+  for (let i = 0; i < 20; i++) {
+    const { height, loadMoreClicked } = await page.evaluate(() => {
+      const loadMoreButton = Array.from(
+        document.querySelectorAll("button, a")
+      ).find((btn) => /load more|show more|plus/i.test(btn.textContent || ""));
+      if (loadMoreButton) {
+        (loadMoreButton instanceof HTMLElement ? loadMoreButton : null)?.click();
+      }
       window.scrollTo(0, document.body.scrollHeight);
-      return document.body.scrollHeight;
+      return {
+        height: document.body.scrollHeight,
+        loadMoreClicked: Boolean(loadMoreButton),
+      };
     });
-    if (currentHeight === previousHeight) break;
-    previousHeight = currentHeight;
+
+    if (height === previousHeight && !loadMoreClicked) {
+      break;
+    }
+    previousHeight = height;
     await sleep(1500);
   }
 }
 
-/**
- * Extraction des produits (à ajuster selon le DOM réel de Princess Auto)
- */
 async function extractProducts(page) {
   console.log("🔍 Extraction des produits...");
 
-  // À ajuster après avoir inspecté le site.
-  const tiles = await page.$$(
-    "div.product-tile, li.product-tile, div.product-grid__item, li.product-grid__item"
-  );
+  const products = await page.evaluate(() => {
+    const tiles = Array.from(
+      document.querySelectorAll(
+        "[data-testid='product-tile'], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item"
+      )
+    );
 
-  console.log(`🧱 Nombre de tuiles candidates: ${tiles.length}`);
+    return tiles
+      .map((tile) => {
+        const getText = (selector) =>
+          tile.querySelector(selector)?.textContent?.trim() || null;
+        const getAttr = (selector, attr) =>
+          tile.querySelector(selector)?.getAttribute(attr) || null;
 
-  const products = [];
+        const title =
+          getText("[itemprop='name']") ||
+          getText(".product-name") ||
+          getText(".product-title") ||
+          getText("a");
+        const rawUrl = getAttr("a", "href");
+        const url = rawUrl ? new URL(rawUrl, document.baseURI).href : null;
+        const imageUrl = getAttr("img", "src") || getAttr("img", "data-src");
+        const currentPriceText =
+          getText(".sales") ||
+          getText(".price-sales") ||
+          getText(".product-price") ||
+          getText(".current-price") ||
+          getText("[data-price-type='finalPrice']") ||
+          getText(".price") ||
+          null;
+        const originalPriceText =
+          getText(".strike-through") ||
+          getText(".price-standard") ||
+          getText(".old-price") ||
+          getText(".was-price") ||
+          null;
 
-  for (const tile of tiles) {
-    try {
-      const title = await tile
-        .$eval(
-          ".product-name, .product-title, [itemprop='name'], a",
-          (el) => el.innerText.trim()
-        )
-        .catch(() => null);
+        if (!title || !url) return null;
 
-      const url = await tile
-        .$eval("a", (el) => el.href)
-        .catch(() => null);
-
-      const imageUrl = await tile
-        .$eval("img", (el) => el.src)
-        .catch(() => null);
-
-      const currentPriceText = await tile
-        .$eval(
-          ".sales, .price-sales, .product-price, .current-price, [data-price-type='finalPrice']",
-          (el) => el.innerText.trim()
-        )
-        .catch(() => null);
-
-      const originalPriceText = await tile
-        .$eval(
-          ".strike-through, .price-standard, .old-price, .was-price",
-          (el) => el.innerText.trim()
-        )
-        .catch(() => null);
-
-      if (!title || !url) {
-        continue;
-      }
-
-      products.push({
-        title,
-        url,
-        imageUrl,
-        currentPriceText,
-        originalPriceText,
-      });
-    } catch (error) {
-      console.warn("⚠️ Erreur sur une tuile, produit ignoré:", error.message);
-    }
-  }
+        return {
+          title,
+          url,
+          imageUrl,
+          currentPriceText,
+          originalPriceText,
+        };
+      })
+      .filter(Boolean);
+  });
 
   console.log(`✅ Produits extraits: ${products.length}`);
   return products;
 }
 
-/**
- * Écrit les produits d'un magasin dans:
- * outputs/princessauto/<slug>/data.json
- */
 function writeStoreOutput(store, products) {
   const slug = store.slug;
   const storeDir = path.join(OUTPUT_ROOT, slug);
   const outputFile = path.join(storeDir, "data.json");
 
-  if (!fs.existsSync(storeDir)) {
-    fs.mkdirSync(storeDir, { recursive: true });
-  }
+  fs.mkdirSync(storeDir, { recursive: true });
 
   const payload = {
     storeName: store.storeName,
@@ -181,15 +170,14 @@ function writeStoreOutput(store, products) {
 
   fs.writeFileSync(outputFile, JSON.stringify(payload, null, 2), "utf8");
 
-  console.log(`💾 Écrit ${products.length} produits pour ${store.storeName} → ${outputFile}`);
+  console.log(
+    `💾 Écrit ${products.length} produit(s) pour ${store.storeName} → ${outputFile}`
+  );
 }
 
-/**
- * Main: on ouvre 1 navigateur, on traite tous les magasins de CE shard.
- * Pour l'instant, la même page clearance est utilisée pour chaque magasin.
- * Plus tard, tu pourras adapter CLEARANCE_URL par magasin (geo, param store, etc.).
- */
 async function main() {
+  ensureOutputsRoot();
+
   const allStores = loadStores();
   const stores = getStoresForThisShard(allStores);
 
@@ -202,9 +190,6 @@ async function main() {
 
   try {
     const page = await browser.newPage();
-
-    // On scrape une seule fois la page de soldes pour CE shard,
-    // puis on réutilise les mêmes produits pour chaque magasin du shard.
     await loadClearancePage(page);
     const products = await extractProducts(page);
 
