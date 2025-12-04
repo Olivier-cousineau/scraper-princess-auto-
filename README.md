@@ -23,3 +23,11 @@ Scripts pour récupérer les soldes Princess Auto. Le script principal scrappe l
 ```bash
 SHARD_TOTAL=1 SHARD_INDEX=0 node scripts/scrape_princessauto_clearance_all_stores.mjs
 ```
+
+## Workflow GitHub Actions
+
+Un workflow manuel est disponible dans **Actions → Scraper Princess Auto** pour lancer le scraping avec sharding configurable :
+
+1. Clique sur « Run workflow ».
+2. Renseigne `shard_total` (nombre de shards à créer) ; laisse `shard_index` vide pour lancer tous les shards ou fournis un index (0-based) pour n'en exécuter qu'un seul.
+3. Les résultats sont archivés en artefacts sous le nom `outputs-shard-<index>`.
