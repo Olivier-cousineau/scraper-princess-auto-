@@ -217,44 +217,45 @@ async function setMyStore(page, store) {
 }
 
 async function enableAvailableInMyStoreFilter(page) {
-  const filterLabel = page
-    .locator("label:has-text('Available in My Store'), text=Available in My Store")
-    .first();
-  const checkbox = filterLabel.locator("input[type='checkbox']").first();
-
-  const checkboxHandle = await checkbox.elementHandle();
-  if (!checkboxHandle) {
-    console.warn("⚠️ Unable to locate checkbox element for Available in My Store");
-    return;
+  const checkboxByRole = page.getByRole("checkbox", { name: /available in my store/i }).first();
+  if ((await checkboxByRole.count().catch(() => 0)) > 0) {
+    const alreadyChecked = await checkboxByRole.isChecked().catch(() => false);
+    if (!alreadyChecked) {
+      await checkboxByRole.check({ force: true }).catch(() => {});
+    }
+    await waitForProductsGrid(page);
+    await page.waitForTimeout(2000);
+    console.log("Available in My Store enabled via checkbox (role selector)");
+    return true;
   }
 
-  if (!(await checkbox.isVisible({ timeout: 7000 }).catch(() => false))) {
-    console.warn("⚠️ Available in My Store checkbox not visible");
-    return;
+  const labelLocator = page.locator("label:has-text('Available in My Store')").first();
+  if ((await labelLocator.count().catch(() => 0)) > 0) {
+    await labelLocator.click({ force: true }).catch(() => {});
+    const nestedCheckbox = labelLocator.locator("input[type='checkbox']").first();
+    if ((await nestedCheckbox.count().catch(() => 0)) > 0) {
+      const nestedChecked = await nestedCheckbox.isChecked().catch(() => false);
+      if (!nestedChecked) {
+        await nestedCheckbox.check({ force: true }).catch(() => {});
+      }
+    }
+    await waitForProductsGrid(page);
+    await page.waitForTimeout(2000);
+    console.log("Available in My Store enabled via label click");
+    return true;
   }
 
-  const availableCountText = await filterLabel.textContent().catch(() => "");
-  const availableCountMatch = availableCountText?.match(/Available in My Store\s*\((\d+)/i);
-  if (availableCountMatch?.[1]) {
-    console.log(`ℹ️ Available in My Store count: ${availableCountMatch[1]}`);
+  const textLocator = page.getByText(/available in my store/i).first();
+  if ((await textLocator.count().catch(() => 0)) > 0) {
+    await textLocator.click({ force: true }).catch(() => {});
+    await waitForProductsGrid(page);
+    await page.waitForTimeout(2000);
+    console.log("Available in My Store enabled via text locator");
+    return true;
   }
 
-  const isChecked = await checkbox.isChecked().catch(() => false);
-  if (!isChecked) {
-    await checkbox.scrollIntoViewIfNeeded().catch(() => {});
-    await checkbox.click({ timeout: 10000 }).catch(() => {});
-    await page.waitForLoadState("networkidle").catch(() => {});
-  }
-
-  await page
-    .waitForFunction((el) => el instanceof HTMLInputElement && el.checked, checkboxHandle, {
-      timeout: 10000,
-    })
-    .catch(() => {});
-
-  await waitForProductsGrid(page);
-  await page.waitForTimeout(2000);
-  console.log("Available in My Store enabled via checkbox");
+  console.warn("⚠️ Unable to locate Available in My Store filter");
+  return false;
 }
 
 async function loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes) {
@@ -492,7 +493,14 @@ async function processStore(page, store, options) {
     ensureStoreTime();
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    await enableAvailableInMyStoreFilter(page);
+    try {
+      const enabled = await enableAvailableInMyStoreFilter(page);
+      if (!enabled) {
+        console.warn("[PA] Filter failed (non-fatal): unavailable");
+      }
+    } catch (error) {
+      console.warn("[PA] Filter failed (non-fatal):", error);
+    }
     await scrollProductListIntoView(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
