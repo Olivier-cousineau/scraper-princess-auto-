@@ -144,14 +144,14 @@ async function scrollProductListIntoView(page) {
   }
 }
 
-async function getCurrentPageNumber(page) {
+async function getActivePageNumber(page) {
   const current = page.locator("[aria-current='page']").first();
   if ((await current.count().catch(() => 0)) === 0) return null;
   const visible = await current.isVisible({ timeout: 1500 }).catch(() => false);
   if (!visible) return null;
   const text = (await current.textContent().catch(() => null))?.trim();
   const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed : text || null;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 async function getFirstProductSignature(page) {
@@ -178,6 +178,7 @@ async function findNextButton(page) {
     "button[aria-label='Next']",
     "a:has-text('Next')",
     "button:has-text('Next')",
+    "[class*='pagination'] a:has-text('>')",
     "[class*='pagination'] button:has-text('>')",
     "[role='navigation'] button:has-text('>')",
     "nav button:has-text('>')",
@@ -301,131 +302,13 @@ async function setMyStore(page, store) {
   }
 }
 
-async function enableAvailableInMyStoreFilter(page) {
-  console.log("🎛️ Attempting store availability filter...");
-
-  const labelRegexes = [
-    /Available in my store/i,
-    /In stock at my store/i,
-    /Store pickup/i,
-    /Pick up in store/i,
-    /In-store availability/i,
-    /Available for store pickup/i,
-  ];
-
-  const openFiltersPanel = async () => {
-    const triggers = [
-      page.locator("button:has-text('Filters')"),
-      page.locator("button:has-text('Filter')"),
-      page.locator("[aria-label*='Filters' i]"),
-    ];
-
-    for (const trigger of triggers) {
-      if (await trigger.isVisible({ timeout: 1500 }).catch(() => false)) {
-        console.log("🪟 Opening Filters panel");
-        await trigger.click({ timeout: 8000 }).catch(() => {});
-        await page.waitForTimeout(1000);
-        break;
-      }
-    }
-  };
-
-  const tryApplyLocator = async (locator) => {
-    if ((await locator.count().catch(() => 0)) === 0) return false;
-    const target = locator.first();
-    const visible = await target.isVisible({ timeout: 2000 }).catch(() => false);
-    if (!visible) return false;
-
-    await target.scrollIntoViewIfNeeded().catch(() => {});
-
-    const tagName = await target.evaluate((el) => el.tagName?.toLowerCase()).catch(() => null);
-    const type = await target.getAttribute("type").catch(() => null);
-    const role = await target.getAttribute("role").catch(() => null);
-
-    if (tagName === "a") {
-      return false;
-    }
-
-    if (tagName === "input" && type === "checkbox") {
-      const alreadyChecked = await target.isChecked().catch(() => false);
-      if (!alreadyChecked) {
-        const checked = await target
-          .check({ force: true })
-          .then(() => true)
-          .catch(() => target.click({ force: true }).then(() => true).catch(() => false));
-        return checked;
-      }
-      return true;
-    }
-
-    if (role === "checkbox" || role === "switch") {
-      const ariaPressed = await target.getAttribute("aria-checked").catch(() => null);
-      if (ariaPressed !== "true") {
-        await target.click({ force: true }).catch(() => {});
-      }
-      return true;
-    }
-
-    const ariaPressed = await target.getAttribute("aria-pressed").catch(() => null);
-    if (ariaPressed !== "true") {
-      await target.click({ force: true }).catch(() => {});
-    }
-    return true;
-  };
-
-  await openFiltersPanel();
-
-  let applied = false;
-  for (const regex of labelRegexes) {
-    const candidates = [
-      page.getByRole("checkbox", { name: regex }),
-      page.getByRole("switch", { name: regex }),
-      page.locator("label").filter({ hasText: regex }).locator("input[type='checkbox']"),
-      page.getByText(regex).locator("xpath=(.//preceding::input[@type='checkbox'])[1]"),
-      page.getByRole("button", { name: regex }),
-      page.getByText(regex),
-    ];
-
-    for (const candidate of candidates) {
-      if (await tryApplyLocator(candidate)) {
-        applied = true;
-        console.log(`✅ Applied store availability filter via label: ${regex}`);
-        break;
-      }
-    }
-
-    if (applied) break;
-  }
-
-  if (applied) {
-    const applyButton = page.locator("button:has-text('Apply')").first();
-    if (await applyButton.isVisible({ timeout: 1500 }).catch(() => false)) {
-      console.log("➡️ Clicking Apply on filters panel");
-      await applyButton.click({ timeout: 5000 }).catch(() => {});
-    } else {
-      const closeButton = page
-        .locator("button:has-text('Close'), button:has-text('Done'), button[aria-label*='close' i]")
-        .first();
-      if (await closeButton.isVisible({ timeout: 1500 }).catch(() => false)) {
-        console.log("➡️ Closing filters panel");
-        await closeButton.click({ timeout: 5000 }).catch(() => {});
-      }
-    }
-
-    await waitForProductsGrid(page);
-    await page.waitForTimeout(1500);
-    return true;
-  }
-
-  console.warn("⚠️ Filter 'Available in My Store' not found (continuing without it).");
-  return false;
-}
 
 async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes) {
   const maxPagesSafe = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : MAX_PAGES_FALLBACK;
-  const allProducts = new Map();
+  const allProducts = [];
+  const seenUrls = new Set();
   let currentSignature = await getFirstProductSignature(page);
-  let currentPageIndicator = await getCurrentPageNumber(page);
+  let currentPageIndicator = await getActivePageNumber(page);
 
   for (let pageIndex = 1; pageIndex <= maxPagesSafe; pageIndex++) {
     if (hasExceededMaxRun(storeStartedAt, maxStoreMinutes)) {
@@ -436,22 +319,20 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
     }
 
     await waitForProductsGrid(page);
+    const sigBefore = currentSignature ?? (await getFirstProductSignature(page));
     const pageProducts = await extractProducts(page);
     for (const product of pageProducts) {
-      if (product.url && !allProducts.has(product.url)) {
-        allProducts.set(product.url, product);
+      if (product.url && !seenUrls.has(product.url)) {
+        seenUrls.add(product.url);
+        allProducts.push(product);
       }
     }
 
-    const activePage = (await getCurrentPageNumber(page)) ?? currentPageIndicator ?? pageIndex;
-    const truncatedSignature = (currentSignature || "n/a").slice(0, 80);
+    const activePage = (await getActivePageNumber(page)) ?? currentPageIndicator ?? pageIndex;
+    const truncatedSignature = (sigBefore || "n/a").slice(0, 120);
     console.log(
       `[PA] ${store.slug} page=${activePage} extracted=${pageProducts.length} first="${truncatedSignature}"`
     );
-
-    if (pageProducts.length === 0) {
-      console.warn(`[PA] ${store.slug} page=${activePage} returned 0 products.`);
-    }
 
     const nextButton = await findNextButton(page);
     if (!nextButton) {
@@ -462,7 +343,7 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
 
     let advanced = false;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const previousSignature = currentSignature;
+      const previousSignature = sigBefore;
       const previousIndicator = currentPageIndicator;
       await nextButton.click({ timeout: 10000 }).catch(() => {});
       const signatureChanged = await waitForSignatureChange(
@@ -473,11 +354,12 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
       );
       if (signatureChanged) {
         currentSignature = await getFirstProductSignature(page);
-        currentPageIndicator = await getCurrentPageNumber(page);
+        currentPageIndicator = await getActivePageNumber(page);
         advanced = true;
         break;
       }
-      await page.waitForTimeout(1000);
+      await nextButton.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(500);
     }
 
     if (!advanced) {
@@ -488,7 +370,7 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
     }
   }
 
-  return Array.from(allProducts.values());
+  return allProducts;
 }
 
 async function extractProducts(page) {
@@ -701,15 +583,6 @@ async function processStore(page, store, options) {
     ensureStoreTime();
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    let filterApplied = false;
-    try {
-      filterApplied = await enableAvailableInMyStoreFilter(page);
-      if (!filterApplied) {
-        console.warn("[PA] Filter failed (non-fatal): unavailable");
-      }
-    } catch (error) {
-      console.warn("[PA] Filter failed (non-fatal):", error);
-    }
     await scrollProductListIntoView(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
