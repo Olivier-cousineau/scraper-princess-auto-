@@ -17,6 +17,12 @@ let activeBrowser = null;
 
 const PRODUCT_TILE_SELECTOR =
   "[data-testid='product-tile'], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item";
+const PRODUCT_LINK_SELECTORS = [
+  "a[href*='/product/']",
+  "a[href*='/p/']",
+  ".product-tile a",
+  "[data-testid*='product'] a",
+];
 
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
@@ -114,11 +120,11 @@ function startSoftTimeout(maxMinutes, getBrowser) {
 }
 
 async function waitForProductsGrid(page) {
-  const tiles = page.locator(PRODUCT_TILE_SELECTOR).first();
+  const productSelectors = [...PRODUCT_LINK_SELECTORS, PRODUCT_TILE_SELECTOR];
   const emptySelectors = ["text=No products", "text=No items", "text=0 items"];
 
   try {
-    await tiles.waitFor({ state: "visible", timeout: 30000 });
+    await page.waitForSelector(productSelectors.join(", "), { timeout: 30000 });
   } catch (error) {
     for (const selector of emptySelectors) {
       const emptyState = page.locator(selector).first();
@@ -129,9 +135,38 @@ async function waitForProductsGrid(page) {
   }
 }
 
+async function findNextHref(page) {
+  const selectors = [
+    "a[rel='next']",
+    "a[aria-label*='next' i]",
+    "a[title*='next' i]",
+    ".pagination-next a",
+    "a.pagination-next",
+    "nav.pagination a[aria-label*='next' i]",
+  ];
+
+  const nextHref = await page.evaluate((nextSelectors) => {
+    for (const selector of nextSelectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const href = el.getAttribute("href") || el.getAttribute("data-href") || "";
+      if (!href) continue;
+      try {
+        return new URL(href, document.baseURI).href;
+      } catch (error) {
+        continue;
+      }
+    }
+    return null;
+  }, selectors);
+
+  return nextHref;
+}
+
 async function navigateToSale(page) {
   console.log(`➡️ Navigating to sale page: ${SALE_URL}`);
   await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
   await waitForProductsGrid(page);
 }
 
@@ -205,36 +240,63 @@ async function setMyStore(page, store) {
 
 
 async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths = []) {
-  const saleBase = SALE_URL;
   const allProducts = [];
   const seen = new Set();
+  let useNoPagination = false;
+  let offset = Number(new URL(page.url()).searchParams.get("No") || "0");
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     ensureStoreTime?.();
-    const url = `${saleBase}?page=${pageNum}&Nrpp=${NRPP}`;
-    console.log(`➡️ Navigating to sale page: ${url}`);
 
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
-
-      await page.waitForTimeout(1200);
-
-      const anchorLocator = page.locator("a[href*='/en/product/']");
-      const anchorCount = await anchorLocator.count();
-      console.log(`🔗 Product anchors detected: ${anchorCount}`);
-
-      if (anchorCount === 0) {
-        console.log(`🛑 Stop pagination: no products on page ${pageNum}`);
-        break;
-      }
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await waitForProductsGrid(page);
 
       const productsOnPage = await extractProducts(page);
+      console.log(
+        `📄 Page ${pageNum}: url=${page.url()} | products=${productsOnPage.length}`
+      );
+
       for (const product of productsOnPage) {
         if (product.url && !seen.has(product.url)) {
           seen.add(product.url);
           allProducts.push(product);
         }
       }
+
+      const nextHref = await findNextHref(page);
+      const hasNoLinks = await page
+        .locator("a[href*='No='], a[href*='nrpp='], a[href*='NRPP=']")
+        .count()
+        .then((c) => c > 0)
+        .catch(() => false);
+
+      let resolvedNextHref = nextHref;
+      if (!resolvedNextHref && (useNoPagination || hasNoLinks)) {
+        useNoPagination = true;
+        offset += NRPP;
+        const u = new URL(page.url());
+        u.searchParams.set("Nrpp", String(NRPP));
+        u.searchParams.set("No", String(offset));
+        u.searchParams.delete("page");
+        resolvedNextHref = u.toString();
+      }
+
+      console.log(
+        `➡️ Next page ${pageNum + 1 <= MAX_PAGES ? pageNum + 1 : "-"}: ${
+          resolvedNextHref || "none"
+        }`
+      );
+
+      if (!resolvedNextHref || productsOnPage.length === 0) {
+        console.log(`🛑 Stop pagination: no next link or no products on page ${pageNum}`);
+        break;
+      }
+
+      await page.goto(resolvedNextHref, { waitUntil: "domcontentloaded" });
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await waitForProductsGrid(page);
     } catch (error) {
       console.error(`⚠️ Failed to process page ${pageNum} for ${store.slug}:`, error);
       debugPaths.push(...(await captureDebug(page, store.slug, `page_${pageNum}_error`)));
@@ -250,15 +312,13 @@ async function extractProducts(page) {
   console.log("🔍 Extracting products...");
 
   const productAnchorCount = await page
-    .locator("a[href*='/product/'], a[href*='/p/']")
+    .locator(PRODUCT_LINK_SELECTORS.join(", "))
     .count()
     .catch(() => 0);
   console.log(`🔗 Product anchors detected before extraction: ${productAnchorCount}`);
 
-  const products = await page.evaluate((productSelector) => {
-    const anchors = Array.from(
-      document.querySelectorAll("a[href*='/product/'], a[href*='/p/']")
-    );
+  const products = await page.evaluate((productSelector, selectors) => {
+    const anchors = Array.from(document.querySelectorAll(selectors.join(", ")));
     const deduped = new Map();
 
     for (const anchor of anchors) {
@@ -315,7 +375,7 @@ async function extractProducts(page) {
     }
 
     return Array.from(deduped.values());
-  }, PRODUCT_TILE_SELECTOR);
+  }, PRODUCT_TILE_SELECTOR, PRODUCT_LINK_SELECTORS);
 
   console.log(`Products extracted: ${products.length}`);
   return products;
