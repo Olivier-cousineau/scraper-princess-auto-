@@ -41,23 +41,51 @@ function loadStores() {
 }
 
 function getStoresForThisShard(allStores) {
-  const shardTotal = Number(process.env.SHARD_TOTAL ?? "1");
-  const shardIndex = Number(process.env.SHARD_INDEX ?? "0");
+  const totalShards = Number(
+    process.env.TOTAL_SHARDS ?? process.env.SHARD_TOTAL ?? "1"
+  );
+  const rawShardIndex = Number(process.env.SHARD_INDEX ?? "0");
 
-  if (Number.isNaN(shardTotal) || shardTotal <= 0) {
-    throw new Error(`Invalid SHARD_TOTAL: ${process.env.SHARD_TOTAL}`);
-  }
-  if (Number.isNaN(shardIndex) || shardIndex < 0 || shardIndex >= shardTotal) {
+  if (Number.isNaN(totalShards) || totalShards <= 0) {
     throw new Error(
-      `Invalid SHARD_INDEX: ${process.env.SHARD_INDEX} (total: ${shardTotal})`
+      `Invalid TOTAL_SHARDS/SHARD_TOTAL: ${process.env.TOTAL_SHARDS ?? process.env.SHARD_TOTAL}`
     );
   }
 
-  const selected = allStores.filter((_, idx) => idx % shardTotal === shardIndex);
+  let shardIndex = rawShardIndex;
+  if (
+    Number.isInteger(rawShardIndex) &&
+    rawShardIndex >= 1 &&
+    rawShardIndex <= totalShards
+  ) {
+    shardIndex = rawShardIndex - 1;
+  }
 
+  if (Number.isNaN(shardIndex) || shardIndex < 0 || shardIndex >= totalShards) {
+    throw new Error(
+      `Invalid SHARD_INDEX: ${process.env.SHARD_INDEX} (total: ${totalShards})`
+    );
+  }
+
+  const n = allStores.length;
+  const s = totalShards;
+  const base = Math.floor(n / s);
+  const rem = n % s;
+  const start = shardIndex * base + Math.min(shardIndex, rem);
+  const end = start + base + (shardIndex < rem ? 1 : 0);
+  const selected = allStores.slice(start, end);
+
+  console.log(`Total stores: ${n}`);
   console.log(
-    `🧩 Shard ${shardIndex + 1}/${shardTotal} – ${selected.length} magasin(s) à traiter`
+    `🧩 Shard ${shardIndex + 1}/${s} handles ${selected.length} stores (start: ${start}, end: ${end - 1})`
   );
+  if (selected.length > 0) {
+    const storePreview = selected
+      .map((store) => store.slug || store.storeId || store.id)
+      .slice(0, 20)
+      .join(", ");
+    console.log(`🗃️ Stores in shard (max 20 shown): ${storePreview}`);
+  }
 
   return selected;
 }
@@ -182,8 +210,8 @@ async function main() {
   const stores = getStoresForThisShard(allStores);
 
   if (stores.length === 0) {
-    console.log("ℹ️ Aucun magasin à traiter sur ce shard, fin.");
-    return;
+    console.log("🟡 No stores assigned to this shard. Exiting cleanly.");
+    process.exit(0);
   }
 
   const browser = await chromium.launch({ headless: true });
