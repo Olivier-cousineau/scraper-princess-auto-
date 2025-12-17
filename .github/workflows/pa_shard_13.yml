@@ -28,13 +28,14 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
 
-      - name: Run Princess Auto scraper (shard 13)
+      - name: Run Princess Auto sale scraper (shard 13)
         continue-on-error: true
         env:
           SHARD_INDEX: 13
           TOTAL_SHARDS: 35
           MAX_PAGES: 50
           MAX_RUN_MINUTES: 150
+          MAX_STORE_MINUTES: 20
         run: node scripts/scrape_princessauto_clearance_all_stores.mjs
 
       - name: Commit & push Princess Auto data
@@ -48,7 +49,7 @@ jobs:
 
           if [ -n "$(git status --porcelain outputs/princessauto)" ]; then
             git add outputs/princessauto
-            git commit -m "Update Princess Auto shard 13/35"
+            git commit -m "Update Princess Auto sale shard 13/35"
             git push
           else
             echo "No changes to commit"
