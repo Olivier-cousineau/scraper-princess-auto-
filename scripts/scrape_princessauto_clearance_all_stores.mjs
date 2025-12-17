@@ -17,6 +17,7 @@ const STORES_JSON = path.join(
   "stores.json"
 );
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
+let activeBrowser = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,24 +43,14 @@ function loadStores() {
 }
 
 function getStoresForThisShard(allStores) {
-  const totalShards = Number(
-    process.env.TOTAL_SHARDS ?? process.env.SHARD_TOTAL ?? "1"
-  );
-  const rawShardIndex = Number(process.env.SHARD_INDEX ?? "0");
+  const totalShards = Number(process.env.TOTAL_SHARDS ?? "35");
+  const rawShard = Number(process.env.SHARD_INDEX ?? "0");
+
+  let shardIndex = rawShard;
+  if (rawShard >= 1 && rawShard <= totalShards) shardIndex = rawShard - 1;
 
   if (Number.isNaN(totalShards) || totalShards <= 0) {
-    throw new Error(
-      `Invalid TOTAL_SHARDS/SHARD_TOTAL: ${process.env.TOTAL_SHARDS ?? process.env.SHARD_TOTAL}`
-    );
-  }
-
-  let shardIndex = rawShardIndex;
-  if (
-    Number.isInteger(rawShardIndex) &&
-    rawShardIndex >= 1 &&
-    rawShardIndex <= totalShards
-  ) {
-    shardIndex = rawShardIndex - 1;
+    throw new Error(`Invalid TOTAL_SHARDS: ${process.env.TOTAL_SHARDS}`);
   }
 
   if (Number.isNaN(shardIndex) || shardIndex < 0 || shardIndex >= totalShards) {
@@ -74,21 +65,47 @@ function getStoresForThisShard(allStores) {
   const rem = n % s;
   const start = shardIndex * base + Math.min(shardIndex, rem);
   const end = start + base + (shardIndex < rem ? 1 : 0);
-  const selected = allStores.slice(start, end);
+  const shardStores = allStores.slice(start, end);
 
   console.log(`Total stores: ${n}`);
   console.log(
-    `🧩 Shard ${shardIndex + 1}/${s} handles ${selected.length} stores (start: ${start}, end: ${end - 1})`
+    `Shard ${shardIndex + 1}/${s} handles ${shardStores.length} stores (${start}..${end - 1})`
   );
-  if (selected.length > 0) {
-    const storePreview = selected
+  if (shardStores.length === 0) {
+    console.log("🟡 No stores assigned to this shard. Exiting cleanly.");
+    process.exit(0);
+  }
+
+  if (shardStores.length > 0) {
+    const storePreview = shardStores
       .map((store) => store.slug || store.storeId || store.id)
       .slice(0, 20)
       .join(", ");
     console.log(`🗃️ Stores in shard (max 20 shown): ${storePreview}`);
   }
 
-  return selected;
+  return shardStores;
+}
+
+function startSoftTimeout(maxMinutes, getBrowser) {
+  if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) return null;
+
+  const maxMs = maxMinutes * 60 * 1000;
+
+  return setTimeout(() => {
+    console.warn(`⏳ MAX_RUN_MINUTES=${maxMinutes} reached. Exiting cleanly.`);
+    const browser = getBrowser?.();
+    if (browser) {
+      browser
+        .close()
+        .catch((error) =>
+          console.error("⚠️ Failed to close browser on soft timeout:", error)
+        )
+        .finally(() => process.exit(0));
+    } else {
+      process.exit(0);
+    }
+  }, maxMs);
 }
 
 async function loadClearancePage(page) {
@@ -209,18 +226,20 @@ function writeStoreOutput(store, products) {
 async function main() {
   ensureOutputsRoot();
 
+  const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES ?? "150");
   const allStores = loadStores();
   const stores = getStoresForThisShard(allStores);
+  const softTimeout = startSoftTimeout(maxRunMinutes, () => activeBrowser);
 
   if (stores.length === 0) {
     console.log("🟡 No stores assigned to this shard. Exiting cleanly.");
     process.exit(0);
   }
 
-  const browser = await chromium.launch({ headless: true });
+  activeBrowser = await chromium.launch({ headless: true });
 
   try {
-    const page = await browser.newPage();
+    const page = await activeBrowser.newPage();
     await loadClearancePage(page);
     const products = await extractProducts(page);
 
@@ -234,7 +253,8 @@ async function main() {
     console.error("❌ Erreur globale dans le scraper Princess Auto:", error);
     process.exitCode = 1;
   } finally {
-    await browser.close();
+    if (softTimeout) clearTimeout(softTimeout);
+    if (activeBrowser) await activeBrowser.close();
   }
 }
 
