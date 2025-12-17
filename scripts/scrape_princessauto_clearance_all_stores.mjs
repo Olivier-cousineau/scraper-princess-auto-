@@ -87,6 +87,15 @@ function getStoresForThisShard(allStores) {
   return shardStores;
 }
 
+function hasExceededMaxRun(startedAt, maxRunMinutes) {
+  if (!Number.isFinite(maxRunMinutes) || maxRunMinutes <= 0) {
+    return false;
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  return elapsedMs >= maxRunMinutes * 60 * 1000;
+}
+
 function startSoftTimeout(maxMinutes, getBrowser) {
   if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) return null;
 
@@ -227,6 +236,7 @@ async function main() {
   ensureOutputsRoot();
 
   const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES ?? "150");
+  const startedAt = Date.now();
   const allStores = loadStores();
   const stores = getStoresForThisShard(allStores);
   const softTimeout = startSoftTimeout(maxRunMinutes, () => activeBrowser);
@@ -244,10 +254,25 @@ async function main() {
     const products = await extractProducts(page);
 
     for (const store of stores) {
+      if (hasExceededMaxRun(startedAt, maxRunMinutes)) {
+        console.warn(
+          `⏹️ MAX_RUN_MINUTES=${maxRunMinutes} reached mid-run. Stopping shard cleanly.`
+        );
+        process.exitCode = 0;
+        break;
+      }
+
       console.log(
         `🛒 Distribution des produits au magasin: ${store.name} (${store.slug})`
       );
-      writeStoreOutput(store, products);
+      try {
+        writeStoreOutput(store, products);
+      } catch (error) {
+        console.error(
+          `⚠️ Échec lors de l'écriture des données pour ${store.slug}:`,
+          error
+        );
+      }
     }
   } catch (error) {
     console.error("❌ Erreur globale dans le scraper Princess Auto:", error);
