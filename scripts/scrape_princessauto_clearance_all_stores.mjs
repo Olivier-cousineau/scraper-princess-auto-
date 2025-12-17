@@ -10,6 +10,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const SALE_URL = "https://www.princessauto.com/en/category/Sale";
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
+const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
 let activeBrowser = null;
 
 const PRODUCT_TILE_SELECTOR =
@@ -18,6 +19,9 @@ const PRODUCT_TILE_SELECTOR =
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
     fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
+  }
+  if (!fs.existsSync(DEBUG_OUTPUT_DIR)) {
+    fs.mkdirSync(DEBUG_OUTPUT_DIR, { recursive: true });
   }
 }
 
@@ -123,6 +127,21 @@ async function waitForProductsGrid(page) {
   }
 }
 
+async function scrollProductListIntoView(page) {
+  const resultsLocator = page.locator("text=/Results\s+\d+\s*-\s*\d+\s+of/i").first();
+  const anchorLocator = page.locator("a[href*='/product/'], a[href*='/p/']");
+
+  for (let i = 0; i < 6; i++) {
+    const hasResultsText = await resultsLocator.isVisible({ timeout: 2000 }).catch(() => false);
+    const anchorCount = await anchorLocator.count().catch(() => 0);
+    if (hasResultsText || anchorCount > 0) {
+      return;
+    }
+    await page.mouse.wheel(0, 800).catch(() => {});
+    await page.waitForTimeout(800);
+  }
+}
+
 async function navigateToSale(page) {
   console.log(`➡️ Navigating to sale page: ${SALE_URL}`);
   await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
@@ -201,21 +220,41 @@ async function enableAvailableInMyStoreFilter(page) {
   const filterLabel = page
     .locator("label:has-text('Available in My Store'), text=Available in My Store")
     .first();
-  if (await filterLabel.isVisible({ timeout: 5000 }).catch(() => false)) {
-    const checkbox = filterLabel.locator("input[type='checkbox']").first();
-    const isChecked = checkbox ? await checkbox.isChecked().catch(() => false) : false;
-    if (!isChecked) {
-      await filterLabel.click({ timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(1500);
-    }
-  } else {
-    const standaloneCheckbox = page.locator("input[type='checkbox']").filter({ hasText: "Available in My Store" });
-    if (await standaloneCheckbox.first().isVisible({ timeout: 5000 }).catch(() => false)) {
-      await standaloneCheckbox.first().check().catch(() => {});
-      await page.waitForTimeout(1500);
-    }
+  const checkbox = filterLabel.locator("input[type='checkbox']").first();
+
+  const checkboxHandle = await checkbox.elementHandle();
+  if (!checkboxHandle) {
+    console.warn("⚠️ Unable to locate checkbox element for Available in My Store");
+    return;
   }
-  console.log("Available in My Store enabled");
+
+  if (!(await checkbox.isVisible({ timeout: 7000 }).catch(() => false))) {
+    console.warn("⚠️ Available in My Store checkbox not visible");
+    return;
+  }
+
+  const availableCountText = await filterLabel.textContent().catch(() => "");
+  const availableCountMatch = availableCountText?.match(/Available in My Store\s*\((\d+)/i);
+  if (availableCountMatch?.[1]) {
+    console.log(`ℹ️ Available in My Store count: ${availableCountMatch[1]}`);
+  }
+
+  const isChecked = await checkbox.isChecked().catch(() => false);
+  if (!isChecked) {
+    await checkbox.scrollIntoViewIfNeeded().catch(() => {});
+    await checkbox.click({ timeout: 10000 }).catch(() => {});
+    await page.waitForLoadState("networkidle").catch(() => {});
+  }
+
+  await page
+    .waitForFunction((el) => el instanceof HTMLInputElement && el.checked, checkboxHandle, {
+      timeout: 10000,
+    })
+    .catch(() => {});
+
+  await waitForProductsGrid(page);
+  await page.waitForTimeout(2000);
+  console.log("Available in My Store enabled via checkbox");
 }
 
 async function loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes) {
@@ -268,48 +307,72 @@ async function loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes) {
 async function extractProducts(page) {
   console.log("🔍 Extracting products...");
 
+  const productAnchorCount = await page
+    .locator("a[href*='/product/'], a[href*='/p/']")
+    .count()
+    .catch(() => 0);
+  console.log(`🔗 Product anchors detected before extraction: ${productAnchorCount}`);
+
   const products = await page.evaluate((productSelector) => {
-    const tiles = Array.from(document.querySelectorAll(productSelector));
+    const anchors = Array.from(
+      document.querySelectorAll("a[href*='/product/'], a[href*='/p/']")
+    );
+    const deduped = new Map();
 
-    return tiles
-      .map((tile) => {
-        const getText = (selector) => tile.querySelector(selector)?.textContent?.trim() || null;
-        const getAttr = (selector, attr) => tile.querySelector(selector)?.getAttribute(attr) || null;
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute("href") || anchor.href;
+      if (!href) continue;
+      const url = new URL(href, document.baseURI).href;
+      if (deduped.has(url)) continue;
 
-        const title =
-          getText("[itemprop='name']") ||
-          getText(".product-name") ||
-          getText(".product-title") ||
-          getText("a");
-        const rawUrl = getAttr("a", "href");
-        const url = rawUrl ? new URL(rawUrl, document.baseURI).href : null;
-        const imageUrl = getAttr("img", "src") || getAttr("img", "data-src");
-        const currentPriceText =
-          getText(".sales") ||
-          getText(".price-sales") ||
-          getText(".product-price") ||
-          getText(".current-price") ||
-          getText("[data-price-type='finalPrice']") ||
-          getText(".price") ||
-          null;
-        const originalPriceText =
-          getText(".strike-through") ||
-          getText(".price-standard") ||
-          getText(".old-price") ||
-          getText(".was-price") ||
-          null;
+      const tile = anchor.closest(productSelector) || anchor.closest("article") || anchor;
+      const getText = (selector) => tile.querySelector(selector)?.textContent?.trim() || null;
+      const getAttr = (selector, attr) => tile.querySelector(selector)?.getAttribute(attr) || null;
 
-        if (!title || !url) return null;
+      const titleFromAttr = anchor.getAttribute("title") || anchor.getAttribute("aria-label");
+      const title =
+        titleFromAttr ||
+        (anchor.textContent || "").trim() ||
+        getText("[itemprop='name']") ||
+        getText(".product-name") ||
+        getText(".product-title");
 
-        return {
-          title,
-          url,
-          imageUrl,
-          currentPrice: currentPriceText,
-          originalPrice: originalPriceText,
-        };
-      })
-      .filter(Boolean);
+      const imageEl =
+        anchor.querySelector("img") ||
+        tile.querySelector("img") ||
+        tile.querySelector("[data-testid='product-image'] img");
+      const imageUrl =
+        imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-lazy") || null;
+
+      const currentPriceText =
+        getText(".sales") ||
+        getText(".price-sales") ||
+        getText(".product-price") ||
+        getText(".current-price") ||
+        getText("[data-price-type='finalPrice']") ||
+        getText(".price") ||
+        getText("[class*='current']") ||
+        null;
+      const originalPriceText =
+        getText(".strike-through") ||
+        getText(".price-standard") ||
+        getText(".old-price") ||
+        getText(".was-price") ||
+        getText("[class*='was']") ||
+        null;
+
+      if (!title || !url) continue;
+
+      deduped.set(url, {
+        title,
+        url,
+        imageUrl,
+        currentPrice: currentPriceText,
+        originalPrice: originalPriceText,
+      });
+    }
+
+    return Array.from(deduped.values());
   }, PRODUCT_TILE_SELECTOR);
 
   console.log(`Products extracted: ${products.length}`);
@@ -342,6 +405,63 @@ function writeStoreOutput(store, products) {
   return payload;
 }
 
+async function captureDebug(page, slug, stage) {
+  const htmlPath = path.join(DEBUG_OUTPUT_DIR, `pa_${slug}_${stage}.html`);
+  const screenshotPath = path.join(DEBUG_OUTPUT_DIR, `pa_${slug}_${stage}.png`);
+
+  try {
+    const html = await page.content();
+    fs.writeFileSync(htmlPath, html, "utf8");
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`📝 Saved debug HTML: ${htmlPath}`);
+    console.log(`📸 Saved debug screenshot: ${screenshotPath}`);
+    return [htmlPath, screenshotPath];
+  } catch (error) {
+    console.warn(`⚠️ Failed to capture debug artifacts for ${slug} (${stage}):`, error);
+    return [];
+  }
+}
+
+function deleteDebugArtifacts(paths) {
+  for (const target of paths) {
+    if (target && fs.existsSync(target)) {
+      try {
+        fs.unlinkSync(target);
+      } catch (error) {
+        console.warn(`⚠️ Failed to delete debug artifact ${target}:`, error);
+      }
+    }
+  }
+}
+
+async function uploadDebugArtifactsIfAvailable(paths) {
+  const existingPaths = paths.filter((p) => fs.existsSync(p));
+  if (existingPaths.length === 0) return;
+
+  if (process.env.GITHUB_ACTIONS !== "true") {
+    console.log("ℹ️ Not running in GitHub Actions; skipping artifact upload.");
+    return;
+  }
+
+  try {
+    // Optional dependency; will log and continue if unavailable.
+    const artifact = await import("@actions/artifact").catch(() => null);
+    if (!artifact?.default?.create) {
+      console.warn("⚠️ @actions/artifact not available; cannot upload debug artifacts.");
+      return;
+    }
+
+    const client = artifact.default.create();
+    const uploadName = `princessauto-debug-${Date.now()}`;
+    await client.uploadArtifact(uploadName, existingPaths, DEBUG_OUTPUT_DIR, {
+      continueOnError: true,
+    });
+    console.log(`⬆️ Uploaded debug artifacts: ${uploadName}`);
+  } catch (error) {
+    console.warn("⚠️ Failed to upload debug artifacts:", error);
+  }
+}
+
 function updateIndex(indexEntries) {
   const indexPath = path.join(OUTPUT_ROOT, "index.json");
   const payload = {
@@ -355,6 +475,7 @@ function updateIndex(indexEntries) {
 async function processStore(page, store, options) {
   const { maxPages, maxStoreMinutes } = options;
   const storeStartedAt = Date.now();
+  const debugPaths = [];
 
   const ensureStoreTime = () => {
     if (hasExceededMaxRun(storeStartedAt, maxStoreMinutes)) {
@@ -370,10 +491,46 @@ async function processStore(page, store, options) {
     await setMyStore(page, store);
     ensureStoreTime();
     await navigateToSale(page);
+    debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     await enableAvailableInMyStoreFilter(page);
+    await scrollProductListIntoView(page);
+    debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
     await loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes);
+    const resultsText = await page
+      .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
+      .first()
+      .textContent()
+      .catch(() => null);
+    let totalResultCount = null;
+    if (resultsText) {
+      const totalMatch = resultsText.match(/of\s+(\d+)/i);
+      if (totalMatch?.[1]) {
+        totalResultCount = Number(totalMatch[1]);
+      }
+      console.log(`ℹ️ Results summary: ${(resultsText || "").trim()}`);
+    }
+
     const products = await extractProducts(page);
+
+    const hasNoResultsText = await page
+      .locator("text=/No results/i, text=/0 results/i, text=/No items/i")
+      .first()
+      .isVisible({ timeout: 2000 })
+      .catch(() => false);
+
+    const isZeroLegit = hasNoResultsText || totalResultCount === 0;
+    const shouldKeepDebug = products.length === 0;
+    if (shouldKeepDebug) {
+      const reason = isZeroLegit
+        ? "Page reports zero results"
+        : "Page indicates results but extraction returned 0";
+      console.warn(`⚠️ No products extracted for ${store.slug}. ${reason}. Keeping debug.`);
+      await uploadDebugArtifactsIfAvailable(debugPaths);
+    } else {
+      deleteDebugArtifacts(debugPaths);
+    }
+
     return writeStoreOutput(store, products);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
