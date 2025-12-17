@@ -12,9 +12,9 @@ const CLEARANCE_URL = "https://www.princessauto.com/en/clearance";
 
 const STORES_JSON = path.join(
   ROOT_DIR,
-  "data",
+  "public",
   "princessauto",
-  "princess_auto_stores.json"
+  "stores.json"
 );
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 
@@ -35,8 +35,9 @@ function loadStores() {
   const raw = fs.readFileSync(STORES_JSON, "utf8");
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) {
-    throw new Error("princess_auto_stores.json must be an array");
+    throw new Error("stores.json must be an array");
   }
+  console.log(`🏪 Loaded ${parsed.length} Princess Auto stores from ${STORES_JSON}`);
   return parsed;
 }
 
@@ -186,11 +187,13 @@ function writeStoreOutput(store, products) {
   fs.mkdirSync(storeDir, { recursive: true });
 
   const payload = {
-    storeName: store.storeName,
+    storeName: store.name,
     city: store.city,
     province: store.province,
-    postalCode: store.postalCode,
-    phone: store.phone,
+    address: store.address,
+    storeId: store.storeId,
+    postalCode: store.postalCode ?? null,
+    phone: store.phone ?? null,
     slug: store.slug,
     updatedAt: new Date().toISOString(),
     products,
@@ -199,7 +202,7 @@ function writeStoreOutput(store, products) {
   fs.writeFileSync(outputFile, JSON.stringify(payload, null, 2), "utf8");
 
   console.log(
-    `💾 Écrit ${products.length} produit(s) pour ${store.storeName} → ${outputFile}`
+    `💾 Écrit ${products.length} produit(s) pour ${store.name} → ${outputFile}`
   );
 }
 
@@ -223,7 +226,7 @@ async function main() {
 
     for (const store of stores) {
       console.log(
-        `🛒 Distribution des produits au magasin: ${store.storeName} (${store.slug})`
+        `🛒 Distribution des produits au magasin: ${store.name} (${store.slug})`
       );
       writeStoreOutput(store, products);
     }
