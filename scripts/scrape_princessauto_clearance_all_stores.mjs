@@ -217,40 +217,47 @@ async function setMyStore(page, store) {
 }
 
 async function enableAvailableInMyStoreFilter(page) {
-  const checkboxByRole = page.getByRole("checkbox", { name: /available in my store/i }).first();
-  if ((await checkboxByRole.count().catch(() => 0)) > 0) {
-    const alreadyChecked = await checkboxByRole.isChecked().catch(() => false);
-    if (!alreadyChecked) {
-      await checkboxByRole.check({ force: true }).catch(() => {});
-    }
-    await waitForProductsGrid(page);
-    await page.waitForTimeout(2000);
-    console.log("Available in My Store enabled via checkbox (role selector)");
-    return true;
-  }
+  const availabilityLine = page
+    .locator("xpath=//*[contains(translate(normalize-space(.), 'AVAILABLE IN MY STORE', 'available in my store'))]")
+    .filter({ hasText: /Available in My Store/i });
 
-  const labelLocator = page.locator("label:has-text('Available in My Store')").first();
-  if ((await labelLocator.count().catch(() => 0)) > 0) {
-    await labelLocator.click({ force: true }).catch(() => {});
-    const nestedCheckbox = labelLocator.locator("input[type='checkbox']").first();
-    if ((await nestedCheckbox.count().catch(() => 0)) > 0) {
-      const nestedChecked = await nestedCheckbox.isChecked().catch(() => false);
-      if (!nestedChecked) {
-        await nestedCheckbox.check({ force: true }).catch(() => {});
+  const lineCount = await availabilityLine.count().catch(() => 0);
+
+  for (let i = 0; i < lineCount; i++) {
+    const line = availabilityLine.nth(i);
+    const isVisible = await line.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!isVisible) continue;
+
+    let checkbox = line.locator("input[type='checkbox']").first();
+
+    if ((await checkbox.count().catch(() => 0)) === 0) {
+      checkbox = line.locator("xpath=(.//preceding::input[@type='checkbox'])[1]").first();
+    }
+
+    const hasCheckbox = (await checkbox.count().catch(() => 0)) > 0;
+    if (!hasCheckbox) continue;
+
+    await checkbox.scrollIntoViewIfNeeded().catch(() => {});
+    const alreadyChecked = await checkbox.isChecked().catch(() => false);
+
+    if (!alreadyChecked) {
+      const checked = await checkbox
+        .check({ force: true })
+        .then(() => true)
+        .catch(async (error) => {
+          console.warn("⚠️ Checkbox check failed, attempting click:", error?.message || error);
+          return checkbox.click({ force: true }).then(() => true).catch(() => false);
+        });
+
+      if (!checked) {
+        console.warn("⚠️ Failed to enable Available in My Store checkbox");
+        continue;
       }
     }
-    await waitForProductsGrid(page);
-    await page.waitForTimeout(2000);
-    console.log("Available in My Store enabled via label click");
-    return true;
-  }
 
-  const textLocator = page.getByText(/available in my store/i).first();
-  if ((await textLocator.count().catch(() => 0)) > 0) {
-    await textLocator.click({ force: true }).catch(() => {});
     await waitForProductsGrid(page);
     await page.waitForTimeout(2000);
-    console.log("Available in My Store enabled via text locator");
+    console.log("Available in My Store enabled via availability row locator");
     return true;
   }
 
@@ -320,6 +327,16 @@ async function extractProducts(page) {
     );
     const deduped = new Map();
 
+    const parsePrice = (text) => {
+      if (!text) return null;
+      const cleaned = text.replace(/[^0-9,.-]/g, "");
+      const normalized = cleaned.includes(",") && !cleaned.includes(".")
+        ? cleaned.replace(",", ".")
+        : cleaned.replace(/,/g, "");
+      const value = Number.parseFloat(normalized);
+      return Number.isFinite(value) ? value : null;
+    };
+
     for (const anchor of anchors) {
       const href = anchor.getAttribute("href") || anchor.href;
       if (!href) continue;
@@ -364,12 +381,22 @@ async function extractProducts(page) {
 
       if (!title || !url) continue;
 
+      const priceSale = currentPriceText || null;
+      const priceRegular = originalPriceText || null;
+      const saleValue = parsePrice(priceSale);
+      const regularValue = parsePrice(priceRegular);
+      const discountPercent =
+        saleValue != null && regularValue != null && regularValue > 0
+          ? Math.round(((regularValue - saleValue) / regularValue) * 100)
+          : null;
+
       deduped.set(url, {
-        title,
-        url,
+        name: title,
+        productUrl: url,
         imageUrl,
-        currentPrice: currentPriceText,
-        originalPrice: originalPriceText,
+        priceSale,
+        priceRegular,
+        ...(discountPercent != null ? { discountPercent } : {}),
       });
     }
 
@@ -384,8 +411,30 @@ function writeStoreOutput(store, products) {
   const slug = store.slug;
   const storeDir = path.join(OUTPUT_ROOT, slug);
   const outputFile = path.join(storeDir, "data.json");
+  const csvFile = path.join(storeDir, "data.csv");
 
   fs.mkdirSync(storeDir, { recursive: true });
+
+  const csvHeaders = ["name", "imageUrl", "productUrl", "priceRegular", "priceSale", "discountPercent"];
+  const csvRows = [csvHeaders.join(",")];
+
+  const escapeCsv = (value) => {
+    if (value === null || value === undefined) return "";
+    const str = String(value);
+    if (/[",\n]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  for (const product of products) {
+    const row = csvHeaders
+      .map((key) => escapeCsv(Object.prototype.hasOwnProperty.call(product, key) ? product[key] : ""))
+      .join(",");
+    csvRows.push(row);
+  }
+
+  fs.writeFileSync(csvFile, csvRows.join("\n"), "utf8");
 
   const payload = {
     storeName: store.name || store.storeName,
