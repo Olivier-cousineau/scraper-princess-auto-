@@ -8,6 +8,8 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 
 const SALE_URL = "https://www.princessauto.com/en/category/Sale";
+const NRPP = parseInt(process.env.NRPP || "50", 10);
+const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
@@ -15,8 +17,6 @@ let activeBrowser = null;
 
 const PRODUCT_TILE_SELECTOR =
   "[data-testid='product-tile'], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item";
-const MAX_SCROLL_CYCLES = 30;
-const MAX_SCROLL_MS = 180000;
 
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
@@ -204,77 +204,46 @@ async function setMyStore(page, store) {
 }
 
 
-async function scrollProductListIntoView(page) {
-  const resultsLocator = page.locator("text=/Results\s+\d+\s*-\s*\d+\s+of/i").first();
-  const anchorLocator = page.locator("a[href*='/product/'], a[href*='/p/']");
+async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths = []) {
+  const saleBase = SALE_URL;
+  const allProducts = [];
+  const seen = new Set();
 
-  for (let i = 0; i < 6; i++) {
-    const hasResultsText = await resultsLocator.isVisible({ timeout: 2000 }).catch(() => false);
-    const anchorCount = await anchorLocator.count().catch(() => 0);
-    if (hasResultsText || anchorCount > 0) {
-      return;
-    }
-    await page.mouse.wheel(0, 800).catch(() => {});
-    await page.waitForTimeout(800);
-  }
-}
-
-async function loadAllProductsByScrolling(page, storeSlug, ensureStoreTime, debugPaths = []) {
-  await waitForProductsGrid(page);
-  const productAnchors = page.locator("a[href*='/product/'], a[href*='/p/']");
-  const initialCount = await productAnchors.count().catch(() => 0);
-  console.log(`[PA] ${storeSlug} initial anchors=${initialCount}`);
-
-  const scrollStartedAt = Date.now();
-  let previousCount = initialCount;
-  let stagnation = 0;
-
-  for (let i = 1; i <= MAX_SCROLL_CYCLES; i++) {
+  for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     ensureStoreTime?.();
-    if (Date.now() - scrollStartedAt >= MAX_SCROLL_MS) {
-      console.log(`[PA] ${storeSlug} scroll timeout reached after ${i - 1} cycles`);
-      break;
-    }
+    const url = `${saleBase}?page=${pageNum}&Nrpp=${NRPP}`;
+    console.log(`➡️ Navigating to sale page: ${url}`);
 
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-    await page.waitForTimeout(1200);
-    await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    const countAfter = await productAnchors.count().catch(() => previousCount);
-    console.log(`[PA] ${storeSlug} scroll cycle=${i} anchors=${countAfter}`);
+      await page.waitForTimeout(1200);
 
-    if (countAfter > previousCount) {
-      previousCount = countAfter;
-      stagnation = 0;
-    } else {
-      stagnation += 1;
-      if (stagnation >= 3) {
+      const anchorLocator = page.locator("a[href*='/en/product/']");
+      const anchorCount = await anchorLocator.count();
+      console.log(`🔗 Product anchors detected: ${anchorCount}`);
+
+      if (anchorCount === 0) {
+        console.log(`🛑 Stop pagination: no products on page ${pageNum}`);
         break;
       }
+
+      const productsOnPage = await extractProducts(page);
+      for (const product of productsOnPage) {
+        if (product.url && !seen.has(product.url)) {
+          seen.add(product.url);
+          allProducts.push(product);
+        }
+      }
+    } catch (error) {
+      console.error(`⚠️ Failed to process page ${pageNum} for ${store.slug}:`, error);
+      debugPaths.push(...(await captureDebug(page, store.slug, `page_${pageNum}_error`)));
+      break;
     }
   }
 
-  const finalCount = await productAnchors.count().catch(() => previousCount);
-  console.log(`[PA] ${storeSlug} final anchors=${finalCount}`);
-
-  if (finalCount === initialCount && finalCount === 100) {
-    debugPaths.push(...(await captureDebug(page, storeSlug, "after_scroll_stagnation")));
-  }
-
-  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-
-  const extracted = await extractProducts(page);
-  const seen = new Set();
-  const deduped = [];
-  for (const product of extracted) {
-    if (product.url && !seen.has(product.url)) {
-      seen.add(product.url);
-      deduped.push(product);
-    }
-  }
-
-  console.log(`[PA] ${storeSlug} total products after scroll=${deduped.length}`);
-  return deduped;
+  console.log(`[PA] ${store.slug} total products across pages=${allProducts.length}`);
+  return allProducts;
 }
 
 async function extractProducts(page) {
@@ -487,9 +456,8 @@ async function processStore(page, store, options) {
     ensureStoreTime();
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    await scrollProductListIntoView(page);
     ensureStoreTime();
-    const allProducts = await loadAllProductsByScrolling(page, store.slug, ensureStoreTime, debugPaths);
+    const allProducts = await loadProductsByPagination(page, store, ensureStoreTime, debugPaths);
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
