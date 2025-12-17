@@ -284,7 +284,9 @@ async function setMyStore(page, store) {
     await page
       .waitForFunction(
         (expectedName) => {
-          const header = Array.from(document.querySelectorAll("header, [data-testid='header']"));
+          const header = Array.from(
+            document.querySelectorAll("header, [data-testid='header'], [data-testid*='store' i]")
+          );
           return header.some((el) => el.textContent?.toLowerCase().includes(expectedName));
         },
         storeLabel.toLowerCase(),
@@ -295,12 +297,47 @@ async function setMyStore(page, store) {
 }
 
 
+async function ensureStoreSynced(page, store, debugPaths = [], attempt = 0) {
+  const storeLabel = store.storeName || store.name || store.slug || store.city;
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  const indicatorMatches = await page
+    .evaluate((expectedName) => {
+      if (!expectedName) return true;
+      const lower = expectedName.toLowerCase();
+      const candidates = Array.from(
+        document.querySelectorAll(
+          "header, [data-testid='header'], [data-testid*='store' i], [class*='store' i], nav"
+        )
+      );
+      const combinedText = candidates
+        .map((el) => el.textContent || "")
+        .join(" \n ")
+        .toLowerCase();
+      return combinedText.includes(lower);
+    }, storeLabel)
+    .catch(() => false);
+
+  if (indicatorMatches) return true;
+
+  if (attempt >= 1) {
+    debugPaths.push(...(await captureDebug(page, store.slug, "store_sync_failed")));
+    throw new Error(`Store indicator mismatch after retry for ${store.slug}`);
+  }
+
+  console.warn(`⚠️ Store indicator did not match after selection for ${store.slug}. Retrying...`);
+  await setMyStore(page, store);
+  return ensureStoreSynced(page, store, debugPaths, attempt + 1);
+}
+
+
 async function loadProductsByPagination(page, store, debugPaths = []) {
   const allProducts = [];
   const seen = new Set();
-  const seenPages = new Set();
   let useNoPagination = false;
   let offset = Number(new URL(page.url()).searchParams.get("No") || "0");
+  let prevSignature = null;
+  let zeroGainStreak = 0;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
@@ -311,19 +348,44 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
       const productsOnPage = await extractProducts(page);
       const currentUrlNoHash = page.url().split("#")[0];
       const firstProductHref = productsOnPage[0]?.url || null;
-      const pageKey = `${currentUrlNoHash}::${firstProductHref || ""}`;
-      const isRepeatedPage = seenPages.has(pageKey);
-      seenPages.add(pageKey);
+      const currentPageUrls = productsOnPage
+        .map((product) => product.url || product.id || product.title || "")
+        .filter(Boolean);
+      const signatureParts = [
+        currentPageUrls.slice(0, 10).join("|"),
+        currentPageUrls.slice(-10).join("|"),
+      ];
+      const pageSignature = signatureParts.join("||");
 
       console.log(
         `📄 Page ${pageNum}: currentUrlNoHash=${currentUrlNoHash} | products=${productsOnPage.length} | firstProductHref=${firstProductHref || "none"}`
       );
 
+      if (prevSignature && pageSignature === prevSignature) {
+        console.log("🛑 Stop pagination: repeated page content detected");
+        break;
+      }
+      prevSignature = pageSignature;
+
+      let newUniqueCount = 0;
       for (const product of productsOnPage) {
         if (product.url && !seen.has(product.url)) {
           seen.add(product.url);
           allProducts.push(product);
+          newUniqueCount += 1;
         }
+      }
+
+      if (newUniqueCount === 0) {
+        zeroGainStreak += 1;
+        if (zeroGainStreak >= 2) {
+          console.log(
+            "🛑 Stop pagination: zero new unique products found on two consecutive pages"
+          );
+          break;
+        }
+      } else {
+        zeroGainStreak = 0;
       }
 
       const nextHref = await findNextHref(page);
@@ -373,11 +435,6 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
           nextHref || "none"
         } | nextUrlNoHash=${nextUrlNoHash || "none"} | resolved=${resolvedNextHref || "none"}`
       );
-
-      if (isRepeatedPage) {
-        console.log("🛑 Stop pagination: repeated page detected");
-        break;
-      }
 
       if (productsOnPage.length === 0) {
         console.log(`🛑 Stop pagination: no products on page ${pageNum}`);
@@ -631,6 +688,7 @@ async function processStore(page, store) {
   try {
     await navigateToSale(page);
     await setMyStore(page, store);
+    await ensureStoreSynced(page, store, debugPaths);
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     const allProducts = await loadProductsByPagination(page, store, debugPaths);
@@ -674,7 +732,22 @@ async function processStore(page, store) {
     return writeStoreOutput(store, allProductsWithStore);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
+    debugPaths.push(...(await captureDebug(page, store.slug, "store_failed")));
+    await uploadDebugArtifactsIfAvailable(debugPaths);
     return null;
+  }
+}
+
+async function processStoreWithIsolatedContext(browser, store) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+  });
+  const page = await context.newPage();
+
+  try {
+    return await processStore(page, store);
+  } finally {
+    await context.close();
   }
 }
 
@@ -716,14 +789,7 @@ async function main() {
         if (currentIndex >= stores.length) return;
         const store = stores[currentIndex];
 
-        const context = await activeBrowser.newContext({
-          viewport: { width: 1280, height: 720 },
-        });
-        const page = await context.newPage();
-
-        const result = await processStore(page, store);
-
-        await context.close();
+        const result = await processStoreWithIsolatedContext(activeBrowser, store);
 
         if (result) {
           indexUpdateQueue = indexUpdateQueue.then(async () => {
