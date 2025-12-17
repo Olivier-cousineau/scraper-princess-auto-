@@ -423,7 +423,7 @@ async function enableAvailableInMyStoreFilter(page) {
 
 async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes) {
   const maxPagesSafe = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : MAX_PAGES_FALLBACK;
-  const aggregated = new Map();
+  const allProducts = new Map();
   let currentSignature = await getFirstProductSignature(page);
   let currentPageIndicator = await getCurrentPageNumber(page);
 
@@ -436,18 +436,22 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
     }
 
     await waitForProductsGrid(page);
-    const products = await extractProducts(page);
-    for (const product of products) {
-      if (product.url && !aggregated.has(product.url)) {
-        aggregated.set(product.url, product);
+    const pageProducts = await extractProducts(page);
+    for (const product of pageProducts) {
+      if (product.url && !allProducts.has(product.url)) {
+        allProducts.set(product.url, product);
       }
     }
 
-    const pageNumber = (await getCurrentPageNumber(page)) ?? currentPageIndicator ?? pageIndex;
+    const activePage = (await getCurrentPageNumber(page)) ?? currentPageIndicator ?? pageIndex;
     const truncatedSignature = (currentSignature || "n/a").slice(0, 80);
     console.log(
-      `[PA] ${store.slug} page=${pageNumber} extracted=${products.length} first="${truncatedSignature}"`
+      `[PA] ${store.slug} page=${activePage} extracted=${pageProducts.length} first="${truncatedSignature}"`
     );
+
+    if (pageProducts.length === 0) {
+      console.warn(`[PA] ${store.slug} page=${activePage} returned 0 products.`);
+    }
 
     const nextButton = await findNextButton(page);
     if (!nextButton) {
@@ -458,11 +462,13 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
 
     let advanced = false;
     for (let attempt = 1; attempt <= 2; attempt++) {
+      const previousSignature = currentSignature;
+      const previousIndicator = currentPageIndicator;
       await nextButton.click({ timeout: 10000 }).catch(() => {});
       const signatureChanged = await waitForSignatureChange(
         page,
-        currentSignature,
-        currentPageIndicator,
+        previousSignature,
+        previousIndicator,
         15000
       );
       if (signatureChanged) {
@@ -482,7 +488,7 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
     }
   }
 
-  return Array.from(aggregated.values());
+  return Array.from(allProducts.values());
 }
 
 async function extractProducts(page) {
@@ -707,7 +713,7 @@ async function processStore(page, store, options) {
     await scrollProductListIntoView(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
-    const products = await loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes);
+    const allProducts = await loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes);
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
@@ -722,7 +728,7 @@ async function processStore(page, store, options) {
       console.log(`ℹ️ Results summary: ${(resultsText || "").trim()}`);
     }
 
-    const productsWithStore = products.map((product) => ({
+    const allProductsWithStore = allProducts.map((product) => ({
       ...product,
       storeSlug: store.slug,
       storeName: store.name || store.storeName || null,
@@ -735,8 +741,7 @@ async function processStore(page, store, options) {
       .catch(() => false);
 
     const isZeroLegit = hasNoResultsText || totalResultCount === 0;
-    const shouldKeepDebug = productsWithStore.length === 0 || !filterApplied;
-    if (shouldKeepDebug) {
+    if (allProductsWithStore.length === 0) {
       const reason = isZeroLegit
         ? "Page reports zero results"
         : "Page indicates results but extraction returned 0";
@@ -746,7 +751,7 @@ async function processStore(page, store, options) {
       deleteDebugArtifacts(debugPaths);
     }
 
-    return writeStoreOutput(store, productsWithStore);
+    return writeStoreOutput(store, allProductsWithStore);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
     return null;
