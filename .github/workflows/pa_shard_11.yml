@@ -1,0 +1,55 @@
+name: Scrape Princess Auto - Shard 11/35
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pa-shard-11
+  cancel-in-progress: false
+
+jobs:
+  pa-shard-11:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run Princess Auto scraper (shard 11)
+        continue-on-error: true
+        env:
+          SHARD_INDEX: 11
+          TOTAL_SHARDS: 35
+          MAX_PAGES: 50
+          MAX_RUN_MINUTES: 150
+        run: node scripts/scrape_princessauto_clearance_all_stores.mjs
+
+      - name: Commit & push Princess Auto data
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git reset --hard origin/main
+
+          if [ -n "$(git status --porcelain outputs/princessauto)" ]; then
+            git add outputs/princessauto
+            git commit -m "Update Princess Auto shard 11/35"
+            git push
+          else
+            echo "No changes to commit"
+          fi
