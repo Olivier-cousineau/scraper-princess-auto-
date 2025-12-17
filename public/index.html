@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Accès rapide aux liquidations</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; }
+    label { display: block; margin-top: 1rem; }
+    select { min-width: 260px; padding: 0.35rem; }
+    #message { margin-top: 1rem; color: #444; font-weight: 600; }
+    #deals { margin-top: 1rem; display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem; }
+    .card h3 { margin: 0 0 0.25rem 0; font-size: 1.05rem; }
+    .muted { color: #666; font-weight: 400; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Accès rapide aux liquidations</h1>
+  <label for="chain">Chaîne</label>
+  <select id="chain">
+    <option value="">Choisir une chaîne…</option>
+    <option value="princessauto">Princess Auto</option>
+  </select>
+
+  <label for="store">Magasin</label>
+  <select id="store" disabled>
+    <option value="">Sélectionnez une chaîne d'abord</option>
+  </select>
+
+  <div id="message"></div>
+  <div id="deals"></div>
+
+  <script type="module">
+    const chainSelect = document.getElementById('chain');
+    const storeSelect = document.getElementById('store');
+    const dealsContainer = document.getElementById('deals');
+    const messageEl = document.getElementById('message');
+
+    const setMessage = (text) => {
+      messageEl.textContent = text || '';
+    };
+
+    const resetDeals = () => {
+      dealsContainer.innerHTML = '';
+    };
+
+    const loadStores = async (chain) => {
+      storeSelect.innerHTML = '<option value="">Choisir un magasin…</option>';
+      storeSelect.disabled = true;
+      resetDeals();
+      setMessage('');
+
+      if (chain === 'princessauto') {
+        const response = await fetch('/princessauto/stores.json');
+        if (!response.ok) {
+          setMessage('Impossible de charger la liste des magasins Princess Auto.');
+          return;
+        }
+        const stores = await response.json();
+        stores.forEach((store) => {
+          const option = document.createElement('option');
+          option.value = store.slug;
+          option.textContent = `${store.name} (${store.city}, ${store.province})`;
+          storeSelect.appendChild(option);
+        });
+        storeSelect.disabled = false;
+      }
+    };
+
+    const loadDeals = async (chain, slug) => {
+      resetDeals();
+      setMessage('');
+      if (!chain || !slug) return;
+
+      if (chain === 'princessauto') {
+        try {
+          const response = await fetch(`/princessauto/${slug}.json`);
+          if (!response.ok) {
+            setMessage('Princess Auto : données de liquidation en préparation. Magasins déjà configurés.');
+            return;
+          }
+          const deals = await response.json();
+          if (!Array.isArray(deals) || deals.length === 0) {
+            setMessage('Aucune liquidation disponible pour le moment.');
+            return;
+          }
+          deals.forEach((deal) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `
+              <h3>${deal.title || 'Produit'}</h3>
+              <div class="muted">${deal.price || ''}</div>
+              <a href="${deal.url || '#'}" target="_blank" rel="noopener">Voir le produit</a>
+            `;
+            dealsContainer.appendChild(card);
+          });
+        } catch (error) {
+          setMessage('Princess Auto : données de liquidation en préparation. Magasins déjà configurés.');
+        }
+      }
+    };
+
+    chainSelect.addEventListener('change', (event) => {
+      const chain = event.target.value;
+      loadStores(chain);
+    });
+
+    storeSelect.addEventListener('change', (event) => {
+      const slug = event.target.value;
+      loadDeals(chainSelect.value, slug);
+    });
+  </script>
+</body>
+</html>
