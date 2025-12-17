@@ -15,8 +15,8 @@ let activeBrowser = null;
 
 const PRODUCT_TILE_SELECTOR =
   "[data-testid='product-tile'], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item";
-
-const MAX_PAGES_FALLBACK = 50;
+const MAX_SCROLL_CYCLES = 30;
+const MAX_SCROLL_MS = 180000;
 
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
@@ -129,151 +129,6 @@ async function waitForProductsGrid(page) {
   }
 }
 
-async function scrollProductListIntoView(page) {
-  const resultsLocator = page.locator("text=/Results\s+\d+\s*-\s*\d+\s+of/i").first();
-  const anchorLocator = page.locator("a[href*='/product/'], a[href*='/p/']");
-
-  for (let i = 0; i < 6; i++) {
-    const hasResultsText = await resultsLocator.isVisible({ timeout: 2000 }).catch(() => false);
-    const anchorCount = await anchorLocator.count().catch(() => 0);
-    if (hasResultsText || anchorCount > 0) {
-      return;
-    }
-    await page.mouse.wheel(0, 800).catch(() => {});
-    await page.waitForTimeout(800);
-  }
-}
-
-async function getActivePageNumber(page) {
-  const current = page.locator("[aria-current='page']").first();
-  if ((await current.count().catch(() => 0)) === 0) return null;
-  const visible = await current.isVisible({ timeout: 1500 }).catch(() => false);
-  if (!visible) return null;
-  const text = (await current.textContent().catch(() => null))?.trim();
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-async function getPaginationRoot(page) {
-  const candidates = [
-    () => page.locator("nav[aria-label*='pagination' i]").first(),
-    () => page.locator("[class*='pagination' i]").first(),
-    () => page.locator("nav:has([aria-current='page'])").first(),
-  ];
-
-  for (const candidate of candidates) {
-    const locator = candidate();
-    if ((await locator.count().catch(() => 0)) > 0) {
-      return locator;
-    }
-  }
-
-  console.log("[PA] Pagination root not found");
-  return null;
-}
-
-async function getNextPageControl(page) {
-  const root = await getPaginationRoot(page);
-  if (!root) {
-    return { next: null, root: null, diagnostics: null };
-  }
-
-  const active = page.locator("[aria-current='page']").first();
-  let activeInRoot = root.locator("[aria-current='page']").first();
-
-  if ((await activeInRoot.count().catch(() => 0)) === 0) {
-    activeInRoot = active;
-  }
-
-  let next = activeInRoot.locator("xpath=following::a[1] | following::button[1]").first();
-  if ((await next.count().catch(() => 0)) > 0) {
-    const nextWithinRoot = root.locator("a,button").filter({ has: next }).first();
-    if ((await nextWithinRoot.count().catch(() => 0)) > 0) {
-      next = nextWithinRoot;
-    } else {
-      next = null;
-    }
-  }
-
-  if (!next || (await next.count().catch(() => 0)) === 0) {
-    next = root.getByRole("link", { name: /^2$/ }).first();
-    if ((await next.count().catch(() => 0)) === 0) {
-      next = root.getByRole("button", { name: /^2$/ }).first();
-    }
-  }
-
-  if (!next || (await next.count().catch(() => 0)) === 0) {
-    next = root.locator("a,button").filter({ hasText: />|›/ }).first();
-  }
-
-  if (!next || (await next.count().catch(() => 0)) === 0) {
-    next = root.locator("a,button").filter({ has: root.locator("svg") }).last();
-  }
-
-  const controlsCount = await root.locator("a,button").count().catch(() => 0);
-  const activeText = await activeInRoot.innerText().catch(() => "?");
-  const nextVisible = next ? await next.isVisible({ timeout: 1500 }).catch(() => false) : null;
-  const nextDisabled = next
-    ? (await next.getAttribute("aria-disabled").catch(() => null)) === "true" ||
-      (await next.isDisabled().catch(() => false))
-    : null;
-
-  console.log(
-    `[PA] pager controls=${controlsCount} active="${activeText}" nextVisible=${nextVisible} nextDisabled=${nextDisabled}`
-  );
-
-  return { next: next && (await next.count().catch(() => 0)) > 0 ? next : null, root };
-}
-
-async function getFirstProductSignature(page) {
-  return page
-    .evaluate(() => {
-      const anchor =
-        document.querySelector("a[href*='/product/'], a[href*='/p/']") ||
-        document.querySelector("[data-testid='product-tile'] a");
-      if (!anchor) return null;
-      const title =
-        anchor.getAttribute("title") ||
-        anchor.getAttribute("aria-label") ||
-        anchor.textContent?.trim() ||
-        "";
-      const href = anchor.getAttribute("href") || "";
-      return `${title}::${href}`.trim();
-    })
-    .catch(() => null);
-}
-
-async function waitForSignatureChange(page, previousSignature, previousPageIndicator, timeout = 15000) {
-  return page
-    .waitForFunction(
-      ([prevSig, prevPage]) => {
-        const anchor =
-          document.querySelector("a[href*='/product/'], a[href*='/p/']") ||
-          document.querySelector("[data-testid='product-tile'] a");
-        const title =
-          anchor?.getAttribute("title") ||
-          anchor?.getAttribute("aria-label") ||
-          anchor?.textContent?.trim() ||
-          "";
-        const href = anchor?.getAttribute("href") || "";
-        const signature = anchor ? `${title}::${href}`.trim() : null;
-
-        const currentPage = Array.from(document.querySelectorAll("[aria-current='page']"))
-          .map((el) => el.textContent?.trim())
-          .find(Boolean);
-
-        const signatureChanged = signature && signature !== prevSig;
-        const pageChanged = currentPage && currentPage !== prevPage;
-
-        return signatureChanged || pageChanged;
-      },
-      [previousSignature, previousPageIndicator],
-      { timeout }
-    )
-    .then(() => true)
-    .catch(() => false);
-}
-
 async function navigateToSale(page) {
   console.log(`➡️ Navigating to sale page: ${SALE_URL}`);
   await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
@@ -349,82 +204,77 @@ async function setMyStore(page, store) {
 }
 
 
-async function loadAllPages(
-  page,
-  store,
-  maxPages,
-  storeStartedAt,
-  maxStoreMinutes,
-  debugPaths = []
-) {
-  const maxPagesSafe = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : MAX_PAGES_FALLBACK;
-  const allProducts = [];
-  const seenUrls = new Set();
-  let currentSignature = await getFirstProductSignature(page);
-  let currentPageIndicator = await getActivePageNumber(page);
+async function scrollProductListIntoView(page) {
+  const resultsLocator = page.locator("text=/Results\s+\d+\s*-\s*\d+\s+of/i").first();
+  const anchorLocator = page.locator("a[href*='/product/'], a[href*='/p/']");
 
-  for (let pageIndex = 1; pageIndex <= maxPagesSafe; pageIndex++) {
-    if (hasExceededMaxRun(storeStartedAt, maxStoreMinutes)) {
-      console.warn(
-        `⏹️ MAX_STORE_MINUTES=${maxStoreMinutes} reached for store. Exiting cleanly.`
-      );
-      process.exit(0);
+  for (let i = 0; i < 6; i++) {
+    const hasResultsText = await resultsLocator.isVisible({ timeout: 2000 }).catch(() => false);
+    const anchorCount = await anchorLocator.count().catch(() => 0);
+    if (hasResultsText || anchorCount > 0) {
+      return;
     }
+    await page.mouse.wheel(0, 800).catch(() => {});
+    await page.waitForTimeout(800);
+  }
+}
 
-    await waitForProductsGrid(page);
-    const sigBefore = currentSignature ?? (await getFirstProductSignature(page));
-    const pageProducts = await extractProducts(page);
-    for (const product of pageProducts) {
-      if (product.url && !seenUrls.has(product.url)) {
-        seenUrls.add(product.url);
-        allProducts.push(product);
-      }
-    }
+async function loadAllProductsByScrolling(page, storeSlug, ensureStoreTime, debugPaths = []) {
+  await waitForProductsGrid(page);
+  const productAnchors = page.locator("a[href*='/product/'], a[href*='/p/']");
+  const initialCount = await productAnchors.count().catch(() => 0);
+  console.log(`[PA] ${storeSlug} initial anchors=${initialCount}`);
 
-    const activePage = (await getActivePageNumber(page)) ?? currentPageIndicator ?? pageIndex;
-    const truncatedSignature = (sigBefore || "n/a").slice(0, 120);
-    console.log(
-      `[PA] ${store.slug} page=${activePage} extracted=${pageProducts.length} first="${truncatedSignature}"`
-    );
+  const scrollStartedAt = Date.now();
+  let previousCount = initialCount;
+  let stagnation = 0;
 
-    const { next: nextButton, root: pagerRoot } = await getNextPageControl(page);
-    if (!pagerRoot || !nextButton) {
+  for (let i = 1; i <= MAX_SCROLL_CYCLES; i++) {
+    ensureStoreTime?.();
+    if (Date.now() - scrollStartedAt >= MAX_SCROLL_MS) {
+      console.log(`[PA] ${storeSlug} scroll timeout reached after ${i - 1} cycles`);
       break;
     }
 
-    await nextButton.scrollIntoViewIfNeeded().catch(() => {});
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await page.waitForTimeout(1200);
+    await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
 
-    let advanced = false;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const previousSignature = sigBefore;
-      const previousIndicator = currentPageIndicator;
-      await nextButton.click({ timeout: 10000 }).catch(() => {});
-      const signatureChanged = await waitForSignatureChange(
-        page,
-        previousSignature,
-        previousIndicator,
-        15000
-      );
-      if (signatureChanged) {
-        currentSignature = await getFirstProductSignature(page);
-        currentPageIndicator = await getActivePageNumber(page);
-        advanced = true;
+    const countAfter = await productAnchors.count().catch(() => previousCount);
+    console.log(`[PA] ${storeSlug} scroll cycle=${i} anchors=${countAfter}`);
+
+    if (countAfter > previousCount) {
+      previousCount = countAfter;
+      stagnation = 0;
+    } else {
+      stagnation += 1;
+      if (stagnation >= 3) {
         break;
       }
-      await nextButton.scrollIntoViewIfNeeded().catch(() => {});
-      await page.waitForTimeout(500);
-    }
-
-    if (!advanced) {
-      console.warn(
-        `[PA] Pagination stopped for ${store.slug}: signature did not change after clicking Next.`
-      );
-      debugPaths.push(...(await captureDebug(page, store.slug, "after_next_failed")));
-      break;
     }
   }
 
-  return allProducts;
+  const finalCount = await productAnchors.count().catch(() => previousCount);
+  console.log(`[PA] ${storeSlug} final anchors=${finalCount}`);
+
+  if (finalCount === initialCount && finalCount === 100) {
+    debugPaths.push(...(await captureDebug(page, storeSlug, "after_scroll_stagnation")));
+  }
+
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+
+  const extracted = await extractProducts(page);
+  const seen = new Set();
+  const deduped = [];
+  for (const product of extracted) {
+    if (product.url && !seen.has(product.url)) {
+      seen.add(product.url);
+      deduped.push(product);
+    }
+  }
+
+  console.log(`[PA] ${storeSlug} total products after scroll=${deduped.length}`);
+  return deduped;
 }
 
 async function extractProducts(page) {
@@ -618,7 +468,7 @@ function updateIndex(indexEntries) {
 }
 
 async function processStore(page, store, options) {
-  const { maxPages, maxStoreMinutes } = options;
+  const { maxStoreMinutes } = options;
   const storeStartedAt = Date.now();
   const debugPaths = [];
 
@@ -639,14 +489,7 @@ async function processStore(page, store, options) {
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     await scrollProductListIntoView(page);
     ensureStoreTime();
-    const allProducts = await loadAllPages(
-      page,
-      store,
-      maxPages,
-      storeStartedAt,
-      maxStoreMinutes,
-      debugPaths
-    );
+    const allProducts = await loadAllProductsByScrolling(page, store.slug, ensureStoreTime, debugPaths);
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
@@ -696,7 +539,6 @@ async function main() {
 
   const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES ?? "150");
   const maxStoreMinutes = Number(process.env.MAX_STORE_MINUTES ?? "20");
-  const maxPages = Number(process.env.MAX_PAGES ?? "50");
   const startedAt = Date.now();
   const allStores = loadStores();
   const stores = getStoresForThisShard(allStores);
@@ -721,7 +563,7 @@ async function main() {
         process.exit(0);
       }
 
-      const result = await processStore(page, store, { maxPages, maxStoreMinutes });
+      const result = await processStore(page, store, { maxStoreMinutes });
 
       if (result) {
         indexEntries.push({
