@@ -217,51 +217,122 @@ async function setMyStore(page, store) {
 }
 
 async function enableAvailableInMyStoreFilter(page) {
-  const availabilityLine = page
-    .locator("xpath=//*[contains(translate(normalize-space(.), 'AVAILABLE IN MY STORE', 'available in my store'))]")
-    .filter({ hasText: /Available in My Store/i });
+  console.log("🎛️ Attempting store availability filter...");
 
-  const lineCount = await availabilityLine.count().catch(() => 0);
+  const labelRegexes = [
+    /Available in my store/i,
+    /In stock at my store/i,
+    /Store pickup/i,
+    /Pick up in store/i,
+    /In-store availability/i,
+    /Available for store pickup/i,
+  ];
 
-  for (let i = 0; i < lineCount; i++) {
-    const line = availabilityLine.nth(i);
-    const isVisible = await line.isVisible({ timeout: 2000 }).catch(() => false);
-    if (!isVisible) continue;
+  const openFiltersPanel = async () => {
+    const triggers = [
+      page.locator("button:has-text('Filters')"),
+      page.locator("button:has-text('Filter')"),
+      page.locator("[aria-label*='Filters' i]"),
+    ];
 
-    let checkbox = line.locator("input[type='checkbox']").first();
+    for (const trigger of triggers) {
+      if (await trigger.isVisible({ timeout: 1500 }).catch(() => false)) {
+        console.log("🪟 Opening Filters panel");
+        await trigger.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+        break;
+      }
+    }
+  };
 
-    if ((await checkbox.count().catch(() => 0)) === 0) {
-      checkbox = line.locator("xpath=(.//preceding::input[@type='checkbox'])[1]").first();
+  const tryApplyLocator = async (locator) => {
+    if ((await locator.count().catch(() => 0)) === 0) return false;
+    const target = locator.first();
+    const visible = await target.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!visible) return false;
+
+    await target.scrollIntoViewIfNeeded().catch(() => {});
+
+    const tagName = await target.evaluate((el) => el.tagName?.toLowerCase()).catch(() => null);
+    const type = await target.getAttribute("type").catch(() => null);
+    const role = await target.getAttribute("role").catch(() => null);
+
+    if (tagName === "a") {
+      return false;
     }
 
-    const hasCheckbox = (await checkbox.count().catch(() => 0)) > 0;
-    if (!hasCheckbox) continue;
+    if (tagName === "input" && type === "checkbox") {
+      const alreadyChecked = await target.isChecked().catch(() => false);
+      if (!alreadyChecked) {
+        const checked = await target
+          .check({ force: true })
+          .then(() => true)
+          .catch(() => target.click({ force: true }).then(() => true).catch(() => false));
+        return checked;
+      }
+      return true;
+    }
 
-    await checkbox.scrollIntoViewIfNeeded().catch(() => {});
-    const alreadyChecked = await checkbox.isChecked().catch(() => false);
+    if (role === "checkbox" || role === "switch") {
+      const ariaPressed = await target.getAttribute("aria-checked").catch(() => null);
+      if (ariaPressed !== "true") {
+        await target.click({ force: true }).catch(() => {});
+      }
+      return true;
+    }
 
-    if (!alreadyChecked) {
-      const checked = await checkbox
-        .check({ force: true })
-        .then(() => true)
-        .catch(async (error) => {
-          console.warn("⚠️ Checkbox check failed, attempting click:", error?.message || error);
-          return checkbox.click({ force: true }).then(() => true).catch(() => false);
-        });
+    const ariaPressed = await target.getAttribute("aria-pressed").catch(() => null);
+    if (ariaPressed !== "true") {
+      await target.click({ force: true }).catch(() => {});
+    }
+    return true;
+  };
 
-      if (!checked) {
-        console.warn("⚠️ Failed to enable Available in My Store checkbox");
-        continue;
+  await openFiltersPanel();
+
+  let applied = false;
+  for (const regex of labelRegexes) {
+    const candidates = [
+      page.getByRole("checkbox", { name: regex }),
+      page.getByRole("switch", { name: regex }),
+      page.locator("label").filter({ hasText: regex }).locator("input[type='checkbox']"),
+      page.getByText(regex).locator("xpath=(.//preceding::input[@type='checkbox'])[1]"),
+      page.getByRole("button", { name: regex }),
+      page.getByText(regex),
+    ];
+
+    for (const candidate of candidates) {
+      if (await tryApplyLocator(candidate)) {
+        applied = true;
+        console.log(`✅ Applied store availability filter via label: ${regex}`);
+        break;
+      }
+    }
+
+    if (applied) break;
+  }
+
+  if (applied) {
+    const applyButton = page.locator("button:has-text('Apply')").first();
+    if (await applyButton.isVisible({ timeout: 1500 }).catch(() => false)) {
+      console.log("➡️ Clicking Apply on filters panel");
+      await applyButton.click({ timeout: 5000 }).catch(() => {});
+    } else {
+      const closeButton = page
+        .locator("button:has-text('Close'), button:has-text('Done'), button[aria-label*='close' i]")
+        .first();
+      if (await closeButton.isVisible({ timeout: 1500 }).catch(() => false)) {
+        console.log("➡️ Closing filters panel");
+        await closeButton.click({ timeout: 5000 }).catch(() => {});
       }
     }
 
     await waitForProductsGrid(page);
-    await page.waitForTimeout(2000);
-    console.log("Available in My Store enabled via availability row locator");
+    await page.waitForTimeout(1500);
     return true;
   }
 
-  console.warn("⚠️ Unable to locate Available in My Store filter");
+  console.warn("⚠️ Filter 'Available in My Store' not found (continuing without it).");
   return false;
 }
 
@@ -327,16 +398,6 @@ async function extractProducts(page) {
     );
     const deduped = new Map();
 
-    const parsePrice = (text) => {
-      if (!text) return null;
-      const cleaned = text.replace(/[^0-9,.-]/g, "");
-      const normalized = cleaned.includes(",") && !cleaned.includes(".")
-        ? cleaned.replace(",", ".")
-        : cleaned.replace(/,/g, "");
-      const value = Number.parseFloat(normalized);
-      return Number.isFinite(value) ? value : null;
-    };
-
     for (const anchor of anchors) {
       const href = anchor.getAttribute("href") || anchor.href;
       if (!href) continue;
@@ -381,22 +442,12 @@ async function extractProducts(page) {
 
       if (!title || !url) continue;
 
-      const priceSale = currentPriceText || null;
-      const priceRegular = originalPriceText || null;
-      const saleValue = parsePrice(priceSale);
-      const regularValue = parsePrice(priceRegular);
-      const discountPercent =
-        saleValue != null && regularValue != null && regularValue > 0
-          ? Math.round(((regularValue - saleValue) / regularValue) * 100)
-          : null;
-
       deduped.set(url, {
-        name: title,
-        productUrl: url,
-        imageUrl,
-        priceSale,
-        priceRegular,
-        ...(discountPercent != null ? { discountPercent } : {}),
+        title,
+        url,
+        image: imageUrl,
+        priceRegular: originalPriceText || null,
+        priceSale: currentPriceText || null,
       });
     }
 
@@ -415,7 +466,7 @@ function writeStoreOutput(store, products) {
 
   fs.mkdirSync(storeDir, { recursive: true });
 
-  const csvHeaders = ["name", "imageUrl", "productUrl", "priceRegular", "priceSale", "discountPercent"];
+  const csvHeaders = ["title", "image", "url", "priceRegular", "priceSale", "storeSlug", "storeName"];
   const csvRows = [csvHeaders.join(",")];
 
   const escapeCsv = (value) => {
@@ -542,9 +593,10 @@ async function processStore(page, store, options) {
     ensureStoreTime();
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
+    let filterApplied = false;
     try {
-      const enabled = await enableAvailableInMyStoreFilter(page);
-      if (!enabled) {
+      filterApplied = await enableAvailableInMyStoreFilter(page);
+      if (!filterApplied) {
         console.warn("[PA] Filter failed (non-fatal): unavailable");
       }
     } catch (error) {
@@ -569,6 +621,11 @@ async function processStore(page, store, options) {
     }
 
     const products = await extractProducts(page);
+    const productsWithStore = products.map((product) => ({
+      ...product,
+      storeSlug: store.slug,
+      storeName: store.name || store.storeName || null,
+    }));
 
     const hasNoResultsText = await page
       .locator("text=/No results/i, text=/0 results/i, text=/No items/i")
@@ -577,7 +634,7 @@ async function processStore(page, store, options) {
       .catch(() => false);
 
     const isZeroLegit = hasNoResultsText || totalResultCount === 0;
-    const shouldKeepDebug = products.length === 0;
+    const shouldKeepDebug = productsWithStore.length === 0 || !filterApplied;
     if (shouldKeepDebug) {
       const reason = isZeroLegit
         ? "Page reports zero results"
@@ -588,7 +645,7 @@ async function processStore(page, store, options) {
       deleteDebugArtifacts(debugPaths);
     }
 
-    return writeStoreOutput(store, products);
+    return writeStoreOutput(store, productsWithStore);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
     return null;
