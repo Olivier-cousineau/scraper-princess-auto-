@@ -317,7 +317,7 @@ async function extractProducts(page) {
     .catch(() => 0);
   console.log(`🔗 Product anchors detected before extraction: ${productAnchorCount}`);
 
-  const products = await page.evaluate((productSelector, selectors) => {
+  const products = await page.evaluate(({ productSelector, selectors }) => {
     const anchors = Array.from(document.querySelectorAll(selectors.join(", ")));
     const deduped = new Map();
 
@@ -375,7 +375,7 @@ async function extractProducts(page) {
     }
 
     return Array.from(deduped.values());
-  }, PRODUCT_TILE_SELECTOR, PRODUCT_LINK_SELECTORS);
+  }, { productSelector: PRODUCT_TILE_SELECTOR, selectors: PRODUCT_LINK_SELECTORS });
 
   console.log(`Products extracted: ${products.length}`);
   return products;
