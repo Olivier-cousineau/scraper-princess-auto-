@@ -6,7 +6,8 @@
     "province": "BC",
     "address": "1925 Enterprise Way, Abbotsford, BC, V2S 7N2",
     "country": "CA",
-    "slug": "abbotsford-bc"
+    "slug": "abbotsford-bc",
+    "storeName": "Abbotsford"
   },
   {
     "storeId": "2",
@@ -15,7 +16,8 @@
     "province": "BC",
     "address": "1789 Versatile Drive, Kamloops, BC, V1S 1W7",
     "country": "CA",
-    "slug": "kamloops-bc"
+    "slug": "kamloops-bc",
+    "storeName": "Kamloops"
   },
   {
     "storeId": "3",
@@ -24,7 +26,8 @@
     "province": "BC",
     "address": "3388 Sexsmith Road, Kelowna, BC, V1X 7S6",
     "country": "CA",
-    "slug": "kelowna-bc"
+    "slug": "kelowna-bc",
+    "storeName": "Kelowna"
   },
   {
     "storeId": "4",
@@ -33,7 +36,8 @@
     "province": "BC",
     "address": "2207 Millstream Road, Langford, BC, V9B 0J8",
     "country": "CA",
-    "slug": "langford-bc"
+    "slug": "langford-bc",
+    "storeName": "Langford"
   },
   {
     "storeId": "5",
@@ -42,7 +46,8 @@
     "province": "BC",
     "address": "20202 66 Avenue, Langley, BC, V2Y 1P3",
     "country": "CA",
-    "slug": "langley-bc"
+    "slug": "langley-bc",
+    "storeName": "Langley"
   },
   {
     "storeId": "6",
@@ -51,7 +56,8 @@
     "province": "BC",
     "address": "4900 Wellington Road, Nanaimo, BC, V9T 4W1",
     "country": "CA",
-    "slug": "nanaimo-bc"
+    "slug": "nanaimo-bc",
+    "storeName": "Nanaimo"
   },
   {
     "storeId": "7",
@@ -60,7 +66,8 @@
     "province": "BC",
     "address": "2555 Range Road, Prince George, BC, V2N 4G8",
     "country": "CA",
-    "slug": "prince-george-bc"
+    "slug": "prince-george-bc",
+    "storeName": "Prince George"
   },
   {
     "storeId": "8",
@@ -69,7 +76,8 @@
     "province": "BC",
     "address": "17665 66A Avenue, Surrey, BC, V3S 2A7",
     "country": "CA",
-    "slug": "surrey-bc"
+    "slug": "surrey-bc",
+    "storeName": "Surrey"
   },
   {
     "storeId": "9",
@@ -78,7 +86,8 @@
     "province": "AB",
     "address": "3204 29 Street NE, Calgary, AB, T1Y 7E9",
     "country": "CA",
-    "slug": "calgary-north-ab"
+    "slug": "calgary-north-ab",
+    "storeName": "Calgary North"
   },
   {
     "storeId": "10",
@@ -87,7 +96,8 @@
     "province": "AB",
     "address": "7380 48 Street SE, Calgary, AB, T2C 4L9",
     "country": "CA",
-    "slug": "calgary-south-ab"
+    "slug": "calgary-south-ab",
+    "storeName": "Calgary South"
   },
   {
     "storeId": "11",
@@ -96,7 +106,8 @@
     "province": "AB",
     "address": "9945 34 Avenue NW, Edmonton, AB, T6E 6J8",
     "country": "CA",
-    "slug": "edmonton-south-ab"
+    "slug": "edmonton-south-ab",
+    "storeName": "Edmonton South"
   },
   {
     "storeId": "12",
@@ -105,7 +116,8 @@
     "province": "AB",
     "address": "17250 102 Avenue NW, Edmonton, AB, T5S 1J7",
     "country": "CA",
-    "slug": "edmonton-west-ab"
+    "slug": "edmonton-west-ab",
+    "storeName": "Edmonton West"
   },
   {
     "storeId": "13",
@@ -114,7 +126,8 @@
     "province": "AB",
     "address": "11910 99 Avenue, Grande Prairie, AB, T8W 0H2",
     "country": "CA",
-    "slug": "grande-prairie-ab"
+    "slug": "grande-prairie-ab",
+    "storeName": "Grande Prairie"
   },
   {
     "storeId": "14",
@@ -123,7 +136,8 @@
     "province": "AB",
     "address": "2721 21 Avenue North, Lethbridge, AB, T1H 5K5",
     "country": "CA",
-    "slug": "lethbridge-ab"
+    "slug": "lethbridge-ab",
+    "storeName": "Lethbridge"
   },
   {
     "storeId": "15",
@@ -132,7 +146,8 @@
     "province": "AB",
     "address": "7705 44 Street, Lloydminster, AB, T9V 0X6",
     "country": "CA",
-    "slug": "lloydminster-ab"
+    "slug": "lloydminster-ab",
+    "storeName": "Lloydminster"
   },
   {
     "storeId": "16",
@@ -141,7 +156,8 @@
     "province": "AB",
     "address": "1840 Strachan Road SE, Medicine Hat, AB, T1B 4K5",
     "country": "CA",
-    "slug": "medicine-hat-ab"
+    "slug": "medicine-hat-ab",
+    "storeName": "Medicine Hat"
   },
   {
     "storeId": "17",
@@ -150,7 +166,8 @@
     "province": "AB",
     "address": "2810 Bremner Avenue, Red Deer, AB, T4R 1M9",
     "country": "CA",
-    "slug": "red-deer-ab"
+    "slug": "red-deer-ab",
+    "storeName": "Red Deer"
   },
   {
     "storeId": "18",
@@ -159,7 +176,8 @@
     "province": "SK",
     "address": "88 Thatcher Drive East, Moose Jaw, SK, S6J 1L8",
     "country": "CA",
-    "slug": "moose-jaw-sk"
+    "slug": "moose-jaw-sk",
+    "storeName": "Moose Jaw"
   },
   {
     "storeId": "19",
@@ -168,7 +186,8 @@
     "province": "SK",
     "address": "3910 Rochdale Boulevard, Regina, SK, S4X 4P7",
     "country": "CA",
-    "slug": "regina-sk"
+    "slug": "regina-sk",
+    "storeName": "Regina"
   },
   {
     "storeId": "20",
@@ -177,7 +196,8 @@
     "province": "SK",
     "address": "3020 Faithfull Avenue, Saskatoon, SK, S7K 8E1",
     "country": "CA",
-    "slug": "saskatoon-east-sk"
+    "slug": "saskatoon-east-sk",
+    "storeName": "Saskatoon East"
   },
   {
     "storeId": "21",
@@ -186,7 +206,8 @@
     "province": "SK",
     "address": "1736 Preston Avenue North, Saskatoon, SK, S7N 4Y1",
     "country": "CA",
-    "slug": "saskatoon-west-sk"
+    "slug": "saskatoon-west-sk",
+    "storeName": "Saskatoon West"
   },
   {
     "storeId": "22",
@@ -195,7 +216,8 @@
     "province": "SK",
     "address": "300 Marquis Road West, Prince Albert, SK, S6V 8B3",
     "country": "CA",
-    "slug": "prince-albert-sk"
+    "slug": "prince-albert-sk",
+    "storeName": "Prince Albert"
   },
   {
     "storeId": "23",
@@ -204,7 +226,8 @@
     "province": "MB",
     "address": "1150 18th Street North, Brandon, MB, R7A 7C5",
     "country": "CA",
-    "slug": "brandon-mb"
+    "slug": "brandon-mb",
+    "storeName": "Brandon"
   },
   {
     "storeId": "24",
@@ -213,7 +236,8 @@
     "province": "MB",
     "address": "1585 Regent Avenue West, Winnipeg, MB, R2C 3B3",
     "country": "CA",
-    "slug": "winnipeg-east-mb"
+    "slug": "winnipeg-east-mb",
+    "storeName": "Winnipeg East"
   },
   {
     "storeId": "25",
@@ -222,7 +246,8 @@
     "province": "MB",
     "address": "1300 Ellice Avenue, Winnipeg, MB, R3G 0E9",
     "country": "CA",
-    "slug": "winnipeg-west-mb"
+    "slug": "winnipeg-west-mb",
+    "storeName": "Winnipeg West"
   },
   {
     "storeId": "26",
@@ -231,7 +256,8 @@
     "province": "ON",
     "address": "135 Mapleview Drive West, Barrie, ON, L4N 9H7",
     "country": "CA",
-    "slug": "barrie-on"
+    "slug": "barrie-on",
+    "storeName": "Barrie"
   },
   {
     "storeId": "27",
@@ -240,7 +266,8 @@
     "province": "ON",
     "address": "256 Bell Boulevard, Belleville, ON, K8P 5H9",
     "country": "CA",
-    "slug": "belleville-on"
+    "slug": "belleville-on",
+    "storeName": "Belleville"
   },
   {
     "storeId": "28",
@@ -249,7 +276,8 @@
     "province": "ON",
     "address": "30 Pinebush Road, Cambridge, ON, N1R 8A7",
     "country": "CA",
-    "slug": "cambridge-on"
+    "slug": "cambridge-on",
+    "storeName": "Cambridge"
   },
   {
     "storeId": "29",
@@ -258,7 +286,8 @@
     "province": "ON",
     "address": "95 Keil Drive South, Chatham, ON, N7M 3H3",
     "country": "CA",
-    "slug": "chatham-on"
+    "slug": "chatham-on",
+    "storeName": "Chatham"
   },
   {
     "storeId": "30",
@@ -267,7 +296,8 @@
     "province": "ON",
     "address": "1865 Barton Street East, Hamilton, ON, L8H 2Y7",
     "country": "CA",
-    "slug": "hamilton-on"
+    "slug": "hamilton-on",
+    "storeName": "Hamilton"
   },
   {
     "storeId": "31",
@@ -276,7 +306,8 @@
     "province": "ON",
     "address": "2282 Princess Street, Kingston, ON, K7M 3G4",
     "country": "CA",
-    "slug": "kingston-on"
+    "slug": "kingston-on",
+    "storeName": "Kingston"
   },
   {
     "storeId": "32",
@@ -285,7 +316,8 @@
     "province": "ON",
     "address": "20 Gateway Park Drive, Kitchener, ON, N2P 2J2",
     "country": "CA",
-    "slug": "kitchener-on"
+    "slug": "kitchener-on",
+    "storeName": "Kitchener"
   },
   {
     "storeId": "33",
@@ -294,7 +326,8 @@
     "province": "ON",
     "address": "438 Clarke Road, London, ON, N5W 4M9",
     "country": "CA",
-    "slug": "london-east-on"
+    "slug": "london-east-on",
+    "storeName": "London East"
   },
   {
     "storeId": "34",
@@ -303,7 +336,8 @@
     "province": "ON",
     "address": "3325 Wonderland Road South, London, ON, N6L 1A7",
     "country": "CA",
-    "slug": "london-west-on"
+    "slug": "london-west-on",
+    "storeName": "London West"
   },
   {
     "storeId": "35",
@@ -312,7 +346,8 @@
     "province": "ON",
     "address": "2100 Dundas Street East, Mississauga, ON, L4X 1L9",
     "country": "CA",
-    "slug": "mississauga-on"
+    "slug": "mississauga-on",
+    "storeName": "Mississauga"
   },
   {
     "storeId": "36",
@@ -321,7 +356,8 @@
     "province": "ON",
     "address": "18195 Yonge Street, Newmarket, ON, L3Y 8V6",
     "country": "CA",
-    "slug": "newmarket-on"
+    "slug": "newmarket-on",
+    "storeName": "Newmarket"
   },
   {
     "storeId": "37",
@@ -330,7 +366,8 @@
     "province": "ON",
     "address": "6777 Morrison Street, Niagara Falls, ON, L2E 6Z6",
     "country": "CA",
-    "slug": "niagara-falls-on"
+    "slug": "niagara-falls-on",
+    "storeName": "Niagara Falls"
   },
   {
     "storeId": "38",
@@ -339,7 +376,8 @@
     "province": "ON",
     "address": "850 McKeown Avenue, North Bay, ON, P1B 0B2",
     "country": "CA",
-    "slug": "north-bay-on"
+    "slug": "north-bay-on",
+    "storeName": "North Bay"
   },
   {
     "storeId": "39",
@@ -348,7 +386,8 @@
     "province": "ON",
     "address": "700 Laval Drive, Oshawa, ON, L1J 0B5",
     "country": "CA",
-    "slug": "oshawa-on"
+    "slug": "oshawa-on",
+    "storeName": "Oshawa"
   },
   {
     "storeId": "40",
@@ -357,7 +396,8 @@
     "province": "ON",
     "address": "2121 Innes Road, Ottawa, ON, K1B 4K3",
     "country": "CA",
-    "slug": "ottawa-east-on"
+    "slug": "ottawa-east-on",
+    "storeName": "Ottawa East"
   },
   {
     "storeId": "41",
@@ -366,7 +406,8 @@
     "province": "ON",
     "address": "2050 Robertson Road, Ottawa, ON, K2H 5Y8",
     "country": "CA",
-    "slug": "ottawa-west-on"
+    "slug": "ottawa-west-on",
+    "storeName": "Ottawa West"
   },
   {
     "storeId": "42",
@@ -375,7 +416,8 @@
     "province": "ON",
     "address": "1499 Lansdowne Street West, Peterborough, ON, K9J 7M3",
     "country": "CA",
-    "slug": "peterborough-on"
+    "slug": "peterborough-on",
+    "storeName": "Peterborough"
   },
   {
     "storeId": "43",
@@ -384,7 +426,8 @@
     "province": "ON",
     "address": "262 Second Line West, Sault Ste. Marie, ON, P6C 2J4",
     "country": "CA",
-    "slug": "sault-ste-marie-on"
+    "slug": "sault-ste-marie-on",
+    "storeName": "Sault Ste. Marie"
   },
   {
     "storeId": "44",
@@ -393,7 +436,8 @@
     "province": "ON",
     "address": "200 Bunting Road, St. Catharines, ON, L2M 3Y1",
     "country": "CA",
-    "slug": "st-catharines-on"
+    "slug": "st-catharines-on",
+    "storeName": "St. Catharines"
   },
   {
     "storeId": "45",
@@ -402,7 +446,8 @@
     "province": "ON",
     "address": "860 Barrydowne Road, Sudbury, ON, P3A 3T7",
     "country": "CA",
-    "slug": "sudbury-on"
+    "slug": "sudbury-on",
+    "storeName": "Sudbury"
   },
   {
     "storeId": "46",
@@ -411,7 +456,8 @@
     "province": "ON",
     "address": "1015 Dawson Road, Thunder Bay, ON, P7B 1K7",
     "country": "CA",
-    "slug": "thunder-bay-on"
+    "slug": "thunder-bay-on",
+    "storeName": "Thunder Bay"
   },
   {
     "storeId": "47",
@@ -420,7 +466,8 @@
     "province": "ON",
     "address": "1650 Victoria Street East, Whitby, ON, L1N 9L4",
     "country": "CA",
-    "slug": "whitby-on"
+    "slug": "whitby-on",
+    "storeName": "Whitby"
   },
   {
     "storeId": "48",
@@ -429,7 +476,8 @@
     "province": "ON",
     "address": "4318 Walker Road, Windsor, ON, N8W 3T5",
     "country": "CA",
-    "slug": "windsor-on"
+    "slug": "windsor-on",
+    "storeName": "Windsor"
   },
   {
     "storeId": "49",
@@ -438,7 +486,8 @@
     "province": "QC",
     "address": "755 Rue Hains, Drummondville, QC, J2C 6Y9",
     "country": "CA",
-    "slug": "drummondville-qc"
+    "slug": "drummondville-qc",
+    "storeName": "Drummondville"
   },
   {
     "storeId": "50",
@@ -447,7 +496,8 @@
     "province": "QC",
     "address": "2225 Boulevard des Laurentides, Laval, QC, H7M 5M5",
     "country": "CA",
-    "slug": "laval-qc"
+    "slug": "laval-qc",
+    "storeName": "Laval"
   },
   {
     "storeId": "51",
@@ -456,7 +506,8 @@
     "province": "QC",
     "address": "150 Rue Valmont, Saint-Jerome, QC, J7Y 4Y2",
     "country": "CA",
-    "slug": "saint-jerome-qc"
+    "slug": "saint-jerome-qc",
+    "storeName": "Saint-Jerome"
   },
   {
     "storeId": "52",
@@ -465,7 +516,8 @@
     "province": "QC",
     "address": "3050 Boulevard de Portland, Sherbrooke, QC, J1L 2T9",
     "country": "CA",
-    "slug": "sherbrooke-qc"
+    "slug": "sherbrooke-qc",
+    "storeName": "Sherbrooke"
   },
   {
     "storeId": "53",
@@ -474,7 +526,8 @@
     "province": "QC",
     "address": "4525 Boulevard des Recollets, Trois-Rivieres, QC, G9A 4N2",
     "country": "CA",
-    "slug": "trois-rivieres-qc"
+    "slug": "trois-rivieres-qc",
+    "storeName": "Trois-Rivieres"
   },
   {
     "storeId": "54",
@@ -483,7 +536,8 @@
     "province": "QC",
     "address": "5500 Boulevard des Gradins, Quebec, QC, G2J 1P8",
     "country": "CA",
-    "slug": "quebec-qc"
+    "slug": "quebec-qc",
+    "storeName": "Quebec"
   },
   {
     "storeId": "55",
@@ -492,7 +546,8 @@
     "province": "QC",
     "address": "2773 Boulevard du Royaume, Saguenay, QC, G7S 5B8",
     "country": "CA",
-    "slug": "saguenay-qc"
+    "slug": "saguenay-qc",
+    "storeName": "Saguenay"
   },
   {
     "storeId": "56",
@@ -501,7 +556,8 @@
     "province": "NB",
     "address": "125 Two Nations Crossing, Fredericton, NB, E3A 0T3",
     "country": "CA",
-    "slug": "fredericton-nb"
+    "slug": "fredericton-nb",
+    "storeName": "Fredericton"
   },
   {
     "storeId": "57",
@@ -510,7 +566,8 @@
     "province": "NB",
     "address": "70 Trinity Drive, Moncton, NB, E1G 2J7",
     "country": "CA",
-    "slug": "moncton-nb"
+    "slug": "moncton-nb",
+    "storeName": "Moncton"
   },
   {
     "storeId": "58",
@@ -519,7 +576,8 @@
     "province": "NB",
     "address": "701 Westmorland Road, Saint John, NB, E2J 2H4",
     "country": "CA",
-    "slug": "saint-john-nb"
+    "slug": "saint-john-nb",
+    "storeName": "Saint John"
   },
   {
     "storeId": "59",
@@ -528,7 +586,8 @@
     "province": "NS",
     "address": "100 Akerley Boulevard, Dartmouth, NS, B3B 1A3",
     "country": "CA",
-    "slug": "dartmouth-ns"
+    "slug": "dartmouth-ns",
+    "storeName": "Dartmouth"
   },
   {
     "storeId": "60",
@@ -537,7 +596,8 @@
     "province": "NS",
     "address": "69 Reeves Street, Sydney, NS, B2A 3A1",
     "country": "CA",
-    "slug": "sydney-ns"
+    "slug": "sydney-ns",
+    "storeName": "Sydney"
   },
   {
     "storeId": "61",
@@ -546,7 +606,8 @@
     "province": "PE",
     "address": "161 Buchanan Drive, Charlottetown, PE, C1E 2E4",
     "country": "CA",
-    "slug": "charlottetown-pe"
+    "slug": "charlottetown-pe",
+    "storeName": "Charlottetown"
   },
   {
     "storeId": "62",
@@ -555,6 +616,7 @@
     "province": "NL",
     "address": "10 Stavanger Drive, St. John's, NL, A1A 5E8",
     "country": "CA",
-    "slug": "st-johns-nl"
+    "slug": "st-johns-nl",
+    "storeName": "St. John's"
   }
 ]
