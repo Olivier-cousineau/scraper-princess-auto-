@@ -163,6 +163,53 @@ async function findNextHref(page) {
   return nextHref;
 }
 
+async function clickNextButtonIfAvailable(page, previousKey) {
+  const selectors = [
+    "button[aria-label*='next' i]",
+    "button[title*='next' i]",
+    ".pagination-next button",
+    "button:has-text('Next')",
+    "button:has-text('Suivant')",
+  ];
+
+  for (const selector of selectors) {
+    const button = page.locator(selector).first();
+    if (!(await button.isVisible({ timeout: 500 }).catch(() => false))) continue;
+    if (await button.isDisabled().catch(() => false)) continue;
+
+    console.log(`🔘 Clicking Next button via selector: ${selector}`);
+    await button.click({ timeout: 10000 }).catch(() => {});
+    await page.waitForLoadState("networkidle").catch(() => {});
+
+    const changed = await page
+      .waitForFunction(
+        (prevKey, selectors) => {
+          const currentUrlNoHash = location.href.split("#")[0];
+          const firstAnchor = Array.from(
+            document.querySelectorAll(selectors.join(", "))
+          ).find((el) => el.getAttribute("href") || el.href);
+          const href = firstAnchor?.getAttribute("href") || firstAnchor?.href || "";
+          const firstProductHref = href ? new URL(href, document.baseURI).href : "";
+          const key = `${currentUrlNoHash}::${firstProductHref}`;
+          return key !== prevKey;
+        },
+        previousKey,
+        PRODUCT_LINK_SELECTORS,
+        { timeout: 10000 }
+      )
+      .catch(() => false);
+
+    if (changed) {
+      console.log("✅ Detected page change after Next button click");
+      return true;
+    }
+
+    console.warn("⚠️ Next button click did not change the page; trying other selectors");
+  }
+
+  return false;
+}
+
 async function navigateToSale(page) {
   console.log(`➡️ Navigating to sale page: ${SALE_URL}`);
   await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
@@ -239,23 +286,28 @@ async function setMyStore(page, store) {
 }
 
 
-async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths = []) {
+async function loadProductsByPagination(page, store, debugPaths = []) {
   const allProducts = [];
   const seen = new Set();
+  const seenPages = new Set();
   let useNoPagination = false;
   let offset = Number(new URL(page.url()).searchParams.get("No") || "0");
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
-    ensureStoreTime?.();
-
     try {
       await page.waitForLoadState("domcontentloaded");
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
       const productsOnPage = await extractProducts(page);
+      const currentUrlNoHash = page.url().split("#")[0];
+      const firstProductHref = productsOnPage[0]?.url || null;
+      const pageKey = `${currentUrlNoHash}::${firstProductHref || ""}`;
+      const isRepeatedPage = seenPages.has(pageKey);
+      seenPages.add(pageKey);
+
       console.log(
-        `📄 Page ${pageNum}: url=${page.url()} | products=${productsOnPage.length}`
+        `📄 Page ${pageNum}: currentUrlNoHash=${currentUrlNoHash} | products=${productsOnPage.length} | firstProductHref=${firstProductHref || "none"}`
       );
 
       for (const product of productsOnPage) {
@@ -266,6 +318,7 @@ async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths
       }
 
       const nextHref = await findNextHref(page);
+      const nextUrlNoHash = nextHref ? nextHref.split("#")[0] : null;
       const hasNoLinks = await page
         .locator("a[href*='No='], a[href*='nrpp='], a[href*='NRPP=']")
         .count()
@@ -273,6 +326,14 @@ async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths
         .catch(() => false);
 
       let resolvedNextHref = nextHref;
+      if (
+        resolvedNextHref === "#" ||
+        (resolvedNextHref && resolvedNextHref.endsWith("#")) ||
+        (nextUrlNoHash && nextUrlNoHash === currentUrlNoHash)
+      ) {
+        resolvedNextHref = null;
+      }
+
       if (!resolvedNextHref && (useNoPagination || hasNoLinks)) {
         useNoPagination = true;
         offset += NRPP;
@@ -284,14 +345,35 @@ async function loadProductsByPagination(page, store, ensureStoreTime, debugPaths
       }
 
       console.log(
-        `➡️ Next page ${pageNum + 1 <= MAX_PAGES ? pageNum + 1 : "-"}: ${
-          resolvedNextHref || "none"
-        }`
+        `➡️ Next page ${pageNum + 1 <= MAX_PAGES ? pageNum + 1 : "-"}: nextHref=${
+          nextHref || "none"
+        } | nextUrlNoHash=${nextUrlNoHash || "none"} | resolved=${resolvedNextHref || "none"}`
       );
 
-      if (!resolvedNextHref || productsOnPage.length === 0) {
-        console.log(`🛑 Stop pagination: no next link or no products on page ${pageNum}`);
+      if (isRepeatedPage) {
+        console.log("🛑 Stop pagination: repeated page detected");
         break;
+      }
+
+      if (productsOnPage.length === 0) {
+        console.log(`🛑 Stop pagination: no products on page ${pageNum}`);
+        break;
+      }
+
+      if (pageNum === MAX_PAGES) {
+        console.log(`🛑 Stop pagination: MAX_PAGES=${MAX_PAGES} reached`);
+        break;
+      }
+
+      if (!resolvedNextHref) {
+        const clicked = await clickNextButtonIfAvailable(page, pageKey);
+        if (!clicked) {
+          console.log(
+            `🛑 Stop pagination: no valid next link or button on page ${pageNum}`
+          );
+          break;
+        }
+        continue;
       }
 
       await page.goto(resolvedNextHref, { waitUntil: "domcontentloaded" });
@@ -496,28 +578,15 @@ function updateIndex(indexEntries) {
   fs.writeFileSync(indexPath, JSON.stringify(payload, null, 2), "utf8");
 }
 
-async function processStore(page, store, options) {
-  const { maxStoreMinutes } = options;
-  const storeStartedAt = Date.now();
+async function processStore(page, store) {
   const debugPaths = [];
 
-  const ensureStoreTime = () => {
-    if (hasExceededMaxRun(storeStartedAt, maxStoreMinutes)) {
-      console.warn(`⏹️ MAX_STORE_MINUTES=${maxStoreMinutes} reached for store. Exiting.`);
-      process.exit(0);
-    }
-  };
-
   try {
-    ensureStoreTime();
     await navigateToSale(page);
-    ensureStoreTime();
     await setMyStore(page, store);
-    ensureStoreTime();
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    ensureStoreTime();
-    const allProducts = await loadProductsByPagination(page, store, ensureStoreTime, debugPaths);
+    const allProducts = await loadProductsByPagination(page, store, debugPaths);
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
@@ -566,7 +635,6 @@ async function main() {
   ensureOutputsRoot();
 
   const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES ?? "150");
-  const maxStoreMinutes = Number(process.env.MAX_STORE_MINUTES ?? "20");
   const startedAt = Date.now();
   const allStores = loadStores();
   const stores = getStoresForThisShard(allStores);
@@ -591,7 +659,7 @@ async function main() {
         process.exit(0);
       }
 
-      const result = await processStore(page, store, { maxStoreMinutes });
+      const result = await processStore(page, store);
 
       if (result) {
         indexEntries.push({
