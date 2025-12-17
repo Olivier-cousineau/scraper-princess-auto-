@@ -154,6 +154,77 @@ async function getActivePageNumber(page) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+async function getPaginationRoot(page) {
+  const candidates = [
+    () => page.locator("nav[aria-label*='pagination' i]").first(),
+    () => page.locator("[class*='pagination' i]").first(),
+    () => page.locator("nav:has([aria-current='page'])").first(),
+  ];
+
+  for (const candidate of candidates) {
+    const locator = candidate();
+    if ((await locator.count().catch(() => 0)) > 0) {
+      return locator;
+    }
+  }
+
+  console.log("[PA] Pagination root not found");
+  return null;
+}
+
+async function getNextPageControl(page) {
+  const root = await getPaginationRoot(page);
+  if (!root) {
+    return { next: null, root: null, diagnostics: null };
+  }
+
+  const active = page.locator("[aria-current='page']").first();
+  let activeInRoot = root.locator("[aria-current='page']").first();
+
+  if ((await activeInRoot.count().catch(() => 0)) === 0) {
+    activeInRoot = active;
+  }
+
+  let next = activeInRoot.locator("xpath=following::a[1] | following::button[1]").first();
+  if ((await next.count().catch(() => 0)) > 0) {
+    const nextWithinRoot = root.locator("a,button").filter({ has: next }).first();
+    if ((await nextWithinRoot.count().catch(() => 0)) > 0) {
+      next = nextWithinRoot;
+    } else {
+      next = null;
+    }
+  }
+
+  if (!next || (await next.count().catch(() => 0)) === 0) {
+    next = root.getByRole("link", { name: /^2$/ }).first();
+    if ((await next.count().catch(() => 0)) === 0) {
+      next = root.getByRole("button", { name: /^2$/ }).first();
+    }
+  }
+
+  if (!next || (await next.count().catch(() => 0)) === 0) {
+    next = root.locator("a,button").filter({ hasText: />|›/ }).first();
+  }
+
+  if (!next || (await next.count().catch(() => 0)) === 0) {
+    next = root.locator("a,button").filter({ has: root.locator("svg") }).last();
+  }
+
+  const controlsCount = await root.locator("a,button").count().catch(() => 0);
+  const activeText = await activeInRoot.innerText().catch(() => "?");
+  const nextVisible = next ? await next.isVisible({ timeout: 1500 }).catch(() => false) : null;
+  const nextDisabled = next
+    ? (await next.getAttribute("aria-disabled").catch(() => null)) === "true" ||
+      (await next.isDisabled().catch(() => false))
+    : null;
+
+  console.log(
+    `[PA] pager controls=${controlsCount} active="${activeText}" nextVisible=${nextVisible} nextDisabled=${nextDisabled}`
+  );
+
+  return { next: next && (await next.count().catch(() => 0)) > 0 ? next : null, root };
+}
+
 async function getFirstProductSignature(page) {
   return page
     .evaluate(() => {
@@ -170,31 +241,6 @@ async function getFirstProductSignature(page) {
       return `${title}::${href}`.trim();
     })
     .catch(() => null);
-}
-
-async function findNextButton(page) {
-  const candidateSelectors = [
-    "a[aria-label='Next']",
-    "button[aria-label='Next']",
-    "a:has-text('Next')",
-    "button:has-text('Next')",
-    "[class*='pagination'] a:has-text('>')",
-    "[class*='pagination'] button:has-text('>')",
-    "[role='navigation'] button:has-text('>')",
-    "nav button:has-text('>')",
-    "nav a:has-text('>')",
-  ];
-
-  for (const selector of candidateSelectors) {
-    const locator = page.locator(selector).first();
-    if ((await locator.count().catch(() => 0)) === 0) continue;
-    const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
-    const disabled = await locator.isDisabled().catch(() => false);
-    if (visible && !disabled) {
-      return locator;
-    }
-  }
-  return null;
 }
 
 async function waitForSignatureChange(page, previousSignature, previousPageIndicator, timeout = 15000) {
@@ -303,7 +349,14 @@ async function setMyStore(page, store) {
 }
 
 
-async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes) {
+async function loadAllPages(
+  page,
+  store,
+  maxPages,
+  storeStartedAt,
+  maxStoreMinutes,
+  debugPaths = []
+) {
   const maxPagesSafe = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : MAX_PAGES_FALLBACK;
   const allProducts = [];
   const seenUrls = new Set();
@@ -334,8 +387,8 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
       `[PA] ${store.slug} page=${activePage} extracted=${pageProducts.length} first="${truncatedSignature}"`
     );
 
-    const nextButton = await findNextButton(page);
-    if (!nextButton) {
+    const { next: nextButton, root: pagerRoot } = await getNextPageControl(page);
+    if (!pagerRoot || !nextButton) {
       break;
     }
 
@@ -366,6 +419,7 @@ async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinut
       console.warn(
         `[PA] Pagination stopped for ${store.slug}: signature did not change after clicking Next.`
       );
+      debugPaths.push(...(await captureDebug(page, store.slug, "after_next_failed")));
       break;
     }
   }
@@ -584,9 +638,15 @@ async function processStore(page, store, options) {
     await navigateToSale(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     await scrollProductListIntoView(page);
-    debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
-    const allProducts = await loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes);
+    const allProducts = await loadAllPages(
+      page,
+      store,
+      maxPages,
+      storeStartedAt,
+      maxStoreMinutes,
+      debugPaths
+    );
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
