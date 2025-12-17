@@ -10,6 +10,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const SALE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
+const CONCURRENCY = Number(process.env.PA_CONCURRENCY ?? "2");
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
@@ -163,7 +164,7 @@ async function findNextHref(page) {
   return nextHref;
 }
 
-async function clickNextButtonIfAvailable(page, previousKey) {
+async function clickNextButtonIfAvailable(page, previousFirstUrls = []) {
   const selectors = [
     "button[aria-label*='next' i]",
     "button[title*='next' i]",
@@ -185,15 +186,23 @@ async function clickNextButtonIfAvailable(page, previousKey) {
       .waitForFunction(
         (prevKey, selectors) => {
           const currentUrlNoHash = location.href.split("#")[0];
-          const firstAnchor = Array.from(
-            document.querySelectorAll(selectors.join(", "))
-          ).find((el) => el.getAttribute("href") || el.href);
-          const href = firstAnchor?.getAttribute("href") || firstAnchor?.href || "";
-          const firstProductHref = href ? new URL(href, document.baseURI).href : "";
-          const key = `${currentUrlNoHash}::${firstProductHref}`;
-          return key !== prevKey;
+          const anchors = Array.from(document.querySelectorAll(selectors.join(", ")));
+          const firstHrefs = anchors
+            .slice(0, 5)
+            .map((el) => el.getAttribute("href") || el.href || "")
+            .map((href) => {
+              try {
+                return new URL(href, document.baseURI).href.split("#")[0];
+              } catch (error) {
+                return "";
+              }
+            })
+            .filter(Boolean);
+
+          const key = `${currentUrlNoHash}::${Array.from(new Set(firstHrefs)).join("|")}`;
+          return !!key && key !== prevKey;
         },
-        previousKey,
+        `${page.url().split("#")[0]}::${Array.from(new Set(previousFirstUrls)).join("|")}`,
         PRODUCT_LINK_SELECTORS,
         { timeout: 10000 }
       )
@@ -325,23 +334,38 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
         .then((c) => c > 0)
         .catch(() => false);
 
-      let resolvedNextHref = nextHref;
-      if (
-        resolvedNextHref === "#" ||
-        (resolvedNextHref && resolvedNextHref.endsWith("#")) ||
-        (nextUrlNoHash && nextUrlNoHash === currentUrlNoHash)
-      ) {
-        resolvedNextHref = null;
+      const normalizeHref = (href) => {
+        if (!href) return null;
+        try {
+          return new URL(href, page.url()).href.split("#")[0];
+        } catch (error) {
+          return null;
+        }
+      };
+
+      let resolvedNextHref = normalizeHref(nextHref);
+      let usedButtonPagination = false;
+
+      if (!resolvedNextHref || resolvedNextHref === currentUrlNoHash) {
+        const previousFirstUrls = productsOnPage
+          .slice(0, 5)
+          .map((p) => p.url)
+          .filter(Boolean);
+        const clicked = await clickNextButtonIfAvailable(page, previousFirstUrls);
+        if (clicked) {
+          usedButtonPagination = true;
+        } else {
+          useNoPagination = true;
+        }
       }
 
-      if (!resolvedNextHref && (useNoPagination || hasNoLinks)) {
-        useNoPagination = true;
+      if (useNoPagination || (!resolvedNextHref && hasNoLinks)) {
         offset += NRPP;
         const u = new URL(page.url());
         u.searchParams.set("Nrpp", String(NRPP));
         u.searchParams.set("No", String(offset));
         u.searchParams.delete("page");
-        resolvedNextHref = u.toString();
+        resolvedNextHref = normalizeHref(u.toString());
       }
 
       console.log(
@@ -365,15 +389,15 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
         break;
       }
 
-      if (!resolvedNextHref) {
-        const clicked = await clickNextButtonIfAvailable(page, pageKey);
-        if (!clicked) {
-          console.log(
-            `🛑 Stop pagination: no valid next link or button on page ${pageNum}`
-          );
-          break;
-        }
+      if (usedButtonPagination) {
         continue;
+      }
+
+      if (!resolvedNextHref) {
+        console.log(
+          `🛑 Stop pagination: no valid next link or button on page ${pageNum}`
+        );
+        break;
       }
 
       await page.goto(resolvedNextHref, { waitUntil: "domcontentloaded" });
@@ -392,73 +416,96 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
 
 async function extractProducts(page) {
   console.log("🔍 Extracting products...");
+  const { products, anchorsTotal, visibleProducts } = await page.evaluate(
+    ({ productSelector, selectors }) => {
+      const anchors = Array.from(document.querySelectorAll(selectors.join(", ")));
+      const deduped = new Map();
+      const visibleKeys = new Set();
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
 
-  const productAnchorCount = await page
-    .locator(PRODUCT_LINK_SELECTORS.join(", "))
-    .count()
-    .catch(() => 0);
-  console.log(`🔗 Product anchors detected before extraction: ${productAnchorCount}`);
+      for (const anchor of anchors) {
+        const href = anchor.getAttribute("href") || anchor.href;
+        if (!href) continue;
+        let url = null;
+        try {
+          url = new URL(href, document.baseURI).href.split("#")[0];
+        } catch (error) {
+          continue;
+        }
 
-  const products = await page.evaluate(({ productSelector, selectors }) => {
-    const anchors = Array.from(document.querySelectorAll(selectors.join(", ")));
-    const deduped = new Map();
+        if (!url || deduped.has(url)) continue;
 
-    for (const anchor of anchors) {
-      const href = anchor.getAttribute("href") || anchor.href;
-      if (!href) continue;
-      const url = new URL(href, document.baseURI).href;
-      if (deduped.has(url)) continue;
+        const tile = anchor.closest(productSelector) || anchor.closest("article") || anchor;
+        const getText = (selector) => tile.querySelector(selector)?.textContent?.trim() || null;
 
-      const tile = anchor.closest(productSelector) || anchor.closest("article") || anchor;
-      const getText = (selector) => tile.querySelector(selector)?.textContent?.trim() || null;
-      const getAttr = (selector, attr) => tile.querySelector(selector)?.getAttribute(attr) || null;
+        const titleFromAttr = anchor.getAttribute("title") || anchor.getAttribute("aria-label");
+        const title =
+          titleFromAttr ||
+          (anchor.textContent || "").trim() ||
+          getText("[itemprop='name']") ||
+          getText(".product-name") ||
+          getText(".product-title");
 
-      const titleFromAttr = anchor.getAttribute("title") || anchor.getAttribute("aria-label");
-      const title =
-        titleFromAttr ||
-        (anchor.textContent || "").trim() ||
-        getText("[itemprop='name']") ||
-        getText(".product-name") ||
-        getText(".product-title");
+        const imageEl =
+          anchor.querySelector("img") ||
+          tile.querySelector("img") ||
+          tile.querySelector("[data-testid='product-image'] img");
+        const imageUrl =
+          imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-lazy") || null;
 
-      const imageEl =
-        anchor.querySelector("img") ||
-        tile.querySelector("img") ||
-        tile.querySelector("[data-testid='product-image'] img");
-      const imageUrl =
-        imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-lazy") || null;
+        const currentPriceText =
+          getText(".sales") ||
+          getText(".price-sales") ||
+          getText(".product-price") ||
+          getText(".current-price") ||
+          getText("[data-price-type='finalPrice']") ||
+          getText(".price") ||
+          getText("[class*='current']") ||
+          null;
+        const originalPriceText =
+          getText(".strike-through") ||
+          getText(".price-standard") ||
+          getText(".old-price") ||
+          getText(".was-price") ||
+          getText("[class*='was']") ||
+          null;
 
-      const currentPriceText =
-        getText(".sales") ||
-        getText(".price-sales") ||
-        getText(".product-price") ||
-        getText(".current-price") ||
-        getText("[data-price-type='finalPrice']") ||
-        getText(".price") ||
-        getText("[class*='current']") ||
-        null;
-      const originalPriceText =
-        getText(".strike-through") ||
-        getText(".price-standard") ||
-        getText(".old-price") ||
-        getText(".was-price") ||
-        getText("[class*='was']") ||
-        null;
+        if (!title || !url) continue;
 
-      if (!title || !url) continue;
+        const rect = tile.getBoundingClientRect();
+        const isVisible =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom > 0 &&
+          rect.right > 0 &&
+          rect.top < viewportHeight &&
+          rect.left < viewportWidth;
 
-      deduped.set(url, {
-        title,
-        url,
-        image: imageUrl,
-        priceRegular: originalPriceText || null,
-        priceSale: currentPriceText || null,
-      });
-    }
+        if (isVisible) {
+          visibleKeys.add(url);
+        }
 
-    return Array.from(deduped.values());
-  }, { productSelector: PRODUCT_TILE_SELECTOR, selectors: PRODUCT_LINK_SELECTORS });
+        deduped.set(url, {
+          title,
+          url,
+          image: imageUrl,
+          priceRegular: originalPriceText || null,
+          priceSale: currentPriceText || null,
+        });
+      }
 
+      return {
+        anchorsTotal: anchors.length,
+        products: Array.from(deduped.values()),
+        visibleProducts: visibleKeys.size,
+      };
+    },
+    { productSelector: PRODUCT_TILE_SELECTOR, selectors: PRODUCT_LINK_SELECTORS }
+  );
+
+  console.log(`🔗 Product anchors detected before extraction: ${anchorsTotal}`);
+  console.log(`🫧 Visible products in viewport: ${visibleProducts}`);
   console.log(`Products extracted: ${products.length}`);
   return products;
 }
@@ -645,37 +692,69 @@ async function main() {
     process.exit(0);
   }
 
+  console.log(`[PA] Processing stores with concurrency=${CONCURRENCY}`);
   activeBrowser = await chromium.launch({ headless: true });
   const indexEntries = [];
+  let indexUpdateQueue = Promise.resolve();
+  let storeIndex = 0;
+  let stopRequested = false;
 
   try {
-    const page = await activeBrowser.newPage({ viewport: { width: 1280, height: 720 } });
+    const worker = async () => {
+      while (true) {
+        if (stopRequested || hasExceededMaxRun(startedAt, maxRunMinutes)) {
+          if (!stopRequested) {
+            console.warn(
+              `⏹️ MAX_RUN_MINUTES=${maxRunMinutes} reached mid-run. Stopping shard cleanly.`
+            );
+          }
+          stopRequested = true;
+          return;
+        }
 
-    for (const store of stores) {
-      if (hasExceededMaxRun(startedAt, maxRunMinutes)) {
-        console.warn(
-          `⏹️ MAX_RUN_MINUTES=${maxRunMinutes} reached mid-run. Stopping shard cleanly.`
-        );
-        process.exit(0);
-      }
+        const currentIndex = storeIndex++;
+        if (currentIndex >= stores.length) return;
+        const store = stores[currentIndex];
 
-      const result = await processStore(page, store);
-
-      if (result) {
-        indexEntries.push({
-          storeId: result.storeId,
-          storeName: result.storeName,
-          city: result.city,
-          province: result.province,
-          address: result.address,
-          slug: result.slug,
-          productCount: result.products.length,
-          updatedAt: result.updatedAt,
-          dataPath: path.relative(ROOT_DIR, path.join(OUTPUT_ROOT, result.slug, "data.json")),
+        const context = await activeBrowser.newContext({
+          viewport: { width: 1280, height: 720 },
         });
-        updateIndex(indexEntries);
+        const page = await context.newPage();
+
+        const result = await processStore(page, store);
+
+        await context.close();
+
+        if (result) {
+          indexUpdateQueue = indexUpdateQueue.then(async () => {
+            indexEntries.push({
+              storeId: result.storeId,
+              storeName: result.storeName,
+              city: result.city,
+              province: result.province,
+              address: result.address,
+              slug: result.slug,
+              productCount: result.products.length,
+              updatedAt: result.updatedAt,
+              dataPath: path.relative(
+                ROOT_DIR,
+                path.join(OUTPUT_ROOT, result.slug, "data.json")
+              ),
+            });
+            updateIndex(indexEntries);
+          });
+
+          await indexUpdateQueue;
+        }
       }
-    }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(Math.max(CONCURRENCY, 1), stores.length) },
+      () => worker()
+    );
+
+    await Promise.all(workers);
   } catch (error) {
     console.error("❌ Global scraper error:", error);
     process.exitCode = 1;
