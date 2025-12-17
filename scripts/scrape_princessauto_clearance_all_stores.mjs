@@ -16,6 +16,8 @@ let activeBrowser = null;
 const PRODUCT_TILE_SELECTOR =
   "[data-testid='product-tile'], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item";
 
+const MAX_PAGES_FALLBACK = 50;
+
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
     fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
@@ -140,6 +142,89 @@ async function scrollProductListIntoView(page) {
     await page.mouse.wheel(0, 800).catch(() => {});
     await page.waitForTimeout(800);
   }
+}
+
+async function getCurrentPageNumber(page) {
+  const current = page.locator("[aria-current='page']").first();
+  if ((await current.count().catch(() => 0)) === 0) return null;
+  const visible = await current.isVisible({ timeout: 1500 }).catch(() => false);
+  if (!visible) return null;
+  const text = (await current.textContent().catch(() => null))?.trim();
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : text || null;
+}
+
+async function getFirstProductSignature(page) {
+  return page
+    .evaluate(() => {
+      const anchor =
+        document.querySelector("a[href*='/product/'], a[href*='/p/']") ||
+        document.querySelector("[data-testid='product-tile'] a");
+      if (!anchor) return null;
+      const title =
+        anchor.getAttribute("title") ||
+        anchor.getAttribute("aria-label") ||
+        anchor.textContent?.trim() ||
+        "";
+      const href = anchor.getAttribute("href") || "";
+      return `${title}::${href}`.trim();
+    })
+    .catch(() => null);
+}
+
+async function findNextButton(page) {
+  const candidateSelectors = [
+    "a[aria-label='Next']",
+    "button[aria-label='Next']",
+    "a:has-text('Next')",
+    "button:has-text('Next')",
+    "[class*='pagination'] button:has-text('>')",
+    "[role='navigation'] button:has-text('>')",
+    "nav button:has-text('>')",
+    "nav a:has-text('>')",
+  ];
+
+  for (const selector of candidateSelectors) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count().catch(() => 0)) === 0) continue;
+    const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
+    const disabled = await locator.isDisabled().catch(() => false);
+    if (visible && !disabled) {
+      return locator;
+    }
+  }
+  return null;
+}
+
+async function waitForSignatureChange(page, previousSignature, previousPageIndicator, timeout = 15000) {
+  return page
+    .waitForFunction(
+      ([prevSig, prevPage]) => {
+        const anchor =
+          document.querySelector("a[href*='/product/'], a[href*='/p/']") ||
+          document.querySelector("[data-testid='product-tile'] a");
+        const title =
+          anchor?.getAttribute("title") ||
+          anchor?.getAttribute("aria-label") ||
+          anchor?.textContent?.trim() ||
+          "";
+        const href = anchor?.getAttribute("href") || "";
+        const signature = anchor ? `${title}::${href}`.trim() : null;
+
+        const currentPage = Array.from(document.querySelectorAll("[aria-current='page']"))
+          .map((el) => el.textContent?.trim())
+          .find(Boolean);
+
+        const signatureChanged = signature && signature !== prevSig;
+        const pageChanged = currentPage && currentPage !== prevPage;
+
+        return signatureChanged || pageChanged;
+      },
+      [previousSignature, previousPageIndicator],
+      { timeout }
+    )
+    .then(() => true)
+    .catch(() => false);
 }
 
 async function navigateToSale(page) {
@@ -336,11 +421,13 @@ async function enableAvailableInMyStoreFilter(page) {
   return false;
 }
 
-async function loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes) {
-  let previousCount = await page.locator(PRODUCT_TILE_SELECTOR).count();
-  let stagnantPages = 0;
+async function loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes) {
+  const maxPagesSafe = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : MAX_PAGES_FALLBACK;
+  const aggregated = new Map();
+  let currentSignature = await getFirstProductSignature(page);
+  let currentPageIndicator = await getCurrentPageNumber(page);
 
-  for (let pageIndex = 1; pageIndex <= maxPages; pageIndex++) {
+  for (let pageIndex = 1; pageIndex <= maxPagesSafe; pageIndex++) {
     if (hasExceededMaxRun(storeStartedAt, maxStoreMinutes)) {
       console.warn(
         `⏹️ MAX_STORE_MINUTES=${maxStoreMinutes} reached for store. Exiting cleanly.`
@@ -348,39 +435,54 @@ async function loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes) {
       process.exit(0);
     }
 
-    const loadMoreButton = page
-      .locator("button:has-text('Load more'), button:has-text('Show more'), button:has-text('View more')")
-      .first();
-    const nextButton = page.locator("a:has-text('Next'), button:has-text('Next')").first();
+    await waitForProductsGrid(page);
+    const products = await extractProducts(page);
+    for (const product of products) {
+      if (product.url && !aggregated.has(product.url)) {
+        aggregated.set(product.url, product);
+      }
+    }
 
-    const hasLoadMore = await loadMoreButton.isVisible({ timeout: 2000 }).catch(() => false);
-    const hasNext = await nextButton.isVisible({ timeout: 2000 }).catch(() => false);
+    const pageNumber = (await getCurrentPageNumber(page)) ?? currentPageIndicator ?? pageIndex;
+    const truncatedSignature = (currentSignature || "n/a").slice(0, 80);
+    console.log(
+      `[PA] ${store.slug} page=${pageNumber} extracted=${products.length} first="${truncatedSignature}"`
+    );
 
-    if (!hasLoadMore && !hasNext) {
+    const nextButton = await findNextButton(page);
+    if (!nextButton) {
       break;
     }
 
-    if (hasLoadMore) {
-      await loadMoreButton.click({ timeout: 10000 }).catch(() => {});
-    } else if (hasNext) {
+    await nextButton.scrollIntoViewIfNeeded().catch(() => {});
+
+    let advanced = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
       await nextButton.click({ timeout: 10000 }).catch(() => {});
+      const signatureChanged = await waitForSignatureChange(
+        page,
+        currentSignature,
+        currentPageIndicator,
+        15000
+      );
+      if (signatureChanged) {
+        currentSignature = await getFirstProductSignature(page);
+        currentPageIndicator = await getCurrentPageNumber(page);
+        advanced = true;
+        break;
+      }
+      await page.waitForTimeout(1000);
     }
 
-    await waitForProductsGrid(page);
-    await page.waitForTimeout(2000);
-
-    const currentCount = await page.locator(PRODUCT_TILE_SELECTOR).count();
-    if (currentCount <= previousCount) {
-      stagnantPages += 1;
-    } else {
-      stagnantPages = 0;
-      previousCount = currentCount;
-    }
-
-    if (stagnantPages >= 2) {
+    if (!advanced) {
+      console.warn(
+        `[PA] Pagination stopped for ${store.slug}: signature did not change after clicking Next.`
+      );
       break;
     }
   }
+
+  return Array.from(aggregated.values());
 }
 
 async function extractProducts(page) {
@@ -605,7 +707,7 @@ async function processStore(page, store, options) {
     await scrollProductListIntoView(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_filter")));
     ensureStoreTime();
-    await loadAllPages(page, maxPages, storeStartedAt, maxStoreMinutes);
+    const products = await loadAllPages(page, store, maxPages, storeStartedAt, maxStoreMinutes);
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
@@ -620,7 +722,6 @@ async function processStore(page, store, options) {
       console.log(`ℹ️ Results summary: ${(resultsText || "").trim()}`);
     }
 
-    const products = await extractProducts(page);
     const productsWithStore = products.map((product) => ({
       ...product,
       storeSlug: store.slug,
