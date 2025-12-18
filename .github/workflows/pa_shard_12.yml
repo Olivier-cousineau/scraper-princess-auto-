@@ -54,3 +54,15 @@ jobs:
           else
             echo "No changes to commit"
           fi
+
+      - name: Upload artifacts (debug + outputs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pa-shard-${{ env.SHARD_INDEX }}-${{ github.run_id }}
+          path: |
+            outputs/debug/**
+            outputs/princessauto/**/data.json
+            outputs/princessauto/**/data.csv
+          if-no-files-found: warn
+          retention-days: 7
