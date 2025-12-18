@@ -9,7 +9,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const BASE_URL = "https://www.princessauto.com";
 const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
-const SALE_URL = withNrpp(SALE_BASE_URL);
+const SALE_URL = withPage(withNrpp(SALE_BASE_URL));
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "40", 10);
 const CONCURRENCY = Number(
   process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
@@ -31,12 +31,19 @@ const PRODUCT_LINK_SELECTORS = [
 function withInStoreFacet(url) {
   const u = new URL(url);
   u.searchParams.set("facet.availability", "56");
+  u.searchParams.set("page", "1");
   return u.toString();
 }
 
 function withNrpp(url) {
   const u = new URL(url);
   u.searchParams.set("Nrpp", String(NRPP));
+  return u.toString();
+}
+
+function withPage(url, page = 1) {
+  const u = new URL(url);
+  u.searchParams.set("page", String(page));
   return u.toString();
 }
 
@@ -90,75 +97,132 @@ async function waitForDomStable(page, { timeoutMs = 12000 } = {}) {
   );
 }
 
-async function extractProductsFromSalePage(page) {
-  return page.evaluate(({ tileSelector, linkSelectors }) => {
-    const tiles = Array.from(document.querySelectorAll(tileSelector));
-    const seen = new Set();
-    const products = [];
+async function extractProductsFromSalePage(page, pageNum = 1) {
+  return page.evaluate(
+    ({ tileSelector, linkSelectors, captureSamples }) => {
+      const tiles = Array.from(document.querySelectorAll(tileSelector));
+      const seen = new Set();
+      const products = [];
+      const rejectedSamples = [];
+      const rejectionStats = {
+        missingHref: 0,
+        missingSku: 0,
+        missingSalePrice: 0,
+        missingTitle: 0,
+      };
+      let missingSkuCount = 0;
 
-    const normalizeUrl = (href) => {
-      if (!href || /ratings=reviews/i.test(href)) return null;
-      try {
-        const url = new URL(href, document.baseURI);
-        url.search = "";
-        url.hash = "";
-        return `${url.origin}${url.pathname}`;
-      } catch (error) {
+      const normalizeUrl = (href) => {
+        if (!href || /ratings=reviews/i.test(href)) return null;
+        try {
+          const url = new URL(href, document.baseURI);
+          url.hash = "";
+          return `${url.origin}${url.pathname}${url.search}`;
+        } catch (error) {
+          return null;
+        }
+      };
+
+      const deriveSkuFromHref = (href) => {
+        if (!href) return null;
+        try {
+          const url = new URL(href, document.baseURI);
+          const skuParam =
+            url.searchParams.get("skuId") || url.searchParams.get("sku");
+          if (skuParam) return skuParam.replace(/[^A-Za-z0-9]/g, "");
+          const pathMatch = url.pathname.match(/\/product\/([A-Za-z0-9]+)/i);
+          if (pathMatch) return pathMatch[1];
+        } catch (error) {
+          const paramMatch = href.match(/skuId=([A-Za-z0-9]+)/i);
+          if (paramMatch) return paramMatch[1];
+          const pathMatch = href.match(/\/product\/([A-Za-z0-9]+)/i);
+          if (pathMatch) return pathMatch[1];
+        }
         return null;
+      };
+
+      const pickImageUrl = (el) => {
+        if (!el) return null;
+        const candidates = [
+          el.getAttribute("src"),
+          el.getAttribute("data-src"),
+          el.getAttribute("data-original"),
+        ].filter(Boolean);
+        const raw = candidates.find(Boolean) || null;
+        if (!raw) return null;
+        return raw.startsWith("//") ? `https:${raw}` : raw;
+      };
+
+      for (const tile of tiles) {
+        const link = linkSelectors
+          .map((selector) => tile.querySelector(selector))
+          .find(Boolean);
+        const rawHref = link?.getAttribute("href") || link?.href || null;
+        const productUrl = normalizeUrl(rawHref);
+        if (!productUrl) {
+          rejectionStats.missingHref += 1;
+          if (captureSamples && rejectedSamples.length < 3) {
+            rejectedSamples.push({
+              reason: "missing_href",
+              outerHTML: tile.outerHTML,
+            });
+          }
+          continue;
+        }
+        if (seen.has(productUrl)) continue;
+
+        const name =
+          tile.getAttribute("data-oe-item-name") ||
+          tile
+            .querySelector("[data-oe-item-name]")
+            ?.getAttribute("data-oe-item-name") ||
+          tile.querySelector("[aria-label]")?.getAttribute("aria-label") ||
+          tile.querySelector("h2,h3")?.textContent?.trim() ||
+          tile.textContent?.trim() ||
+          "";
+
+        const img = tile.querySelector("img");
+        const imageUrl = pickImageUrl(img);
+
+        const skuMatch = tile.innerText.match(
+          /\b(?:SKU|UGS)\s*[:#]?\s*([A-Z0-9]{5,15})\b/i
+        );
+        const sku = deriveSkuFromHref(rawHref) || skuMatch?.[1] || null;
+        if (!sku) missingSkuCount += 1;
+
+        const priceRegularText =
+          tile.querySelector(".cc-product-before-price")?.textContent || "";
+        const priceSaleText =
+          tile.querySelector(".cc-product-after-price")?.textContent || "";
+
+        products.push({
+          productUrl,
+          rawHref,
+          name,
+          imageUrl,
+          sku,
+          priceRegular: priceRegularText,
+          priceSale: priceSaleText,
+          tileOuterHTML: captureSamples ? tile.outerHTML : undefined,
+        });
+
+        seen.add(productUrl);
       }
-    };
 
-    const pickImageUrl = (el) => {
-      if (!el) return null;
-      const candidates = [
-        el.getAttribute("src"),
-        el.getAttribute("data-src"),
-        el.getAttribute("data-original"),
-      ].filter(Boolean);
-      const raw = candidates.find(Boolean) || null;
-      if (!raw) return null;
-      return raw.startsWith("//") ? `https:${raw}` : raw;
-    };
-
-    for (const tile of tiles) {
-      const link = linkSelectors
-        .map((selector) => tile.querySelector(selector))
-        .find(Boolean);
-      const rawHref = link?.getAttribute("href") || link?.href || null;
-      const productUrl = normalizeUrl(rawHref);
-      if (!productUrl || seen.has(productUrl)) continue;
-
-      const name =
-        tile.getAttribute("data-oe-item-name") ||
-        tile.querySelector("[data-oe-item-name]")?.getAttribute("data-oe-item-name") ||
-        tile.querySelector("[aria-label]")?.getAttribute("aria-label") ||
-        tile.querySelector("h2,h3")?.textContent?.trim() ||
-        tile.textContent?.trim() ||
-        "";
-
-      const img = tile.querySelector("img");
-      const imageUrl = pickImageUrl(img);
-
-      const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
-      const sku = skuMatch?.[1] || null;
-
-      const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
-      const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
-
-      products.push({
-        productUrl,
-        name,
-        imageUrl,
-        sku,
-        priceRegular: priceRegularText,
-        priceSale: priceSaleText,
-      });
-
-      seen.add(productUrl);
+      return {
+        products,
+        tilesFound: tiles.length,
+        missingSkuCount,
+        rejectionStats,
+        rejectedSamples,
+      };
+    },
+    {
+      tileSelector: PRODUCT_TILE_SELECTOR,
+      linkSelectors: PRODUCT_LINK_SELECTORS,
+      captureSamples: pageNum === 1,
     }
-
-    return { products, tilesFound: tiles.length };
-  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+  );
 }
 
 async function goToNextPageUI(page) {
@@ -757,6 +821,13 @@ async function loadProductsByPagination(
   let totalTilesFound = 0;
   let uiTotal = null;
   const usedFacetAvailability = !!saleNavigationMeta?.usedFacetAvailability;
+  const rejectionStats = {
+    missingHref: 0,
+    missingSku: 0,
+    missingSalePrice: 0,
+    missingTitle: 0,
+  };
+  const rejectedSamples = [];
 
   const readUiTotal = async () => {
     const text = await page.textContent("text=/\\d+\\s*(?:items|results)/i").catch(() => null);
@@ -771,13 +842,31 @@ async function loadProductsByPagination(
       await humanScrollToBottom(page);
       await waitForDomStable(page);
 
-      const extraction = await extractProductsFromSalePage(page);
+      const extraction = await extractProductsFromSalePage(page, pageNum);
       totalTilesFound += extraction.tilesFound || 0;
-      const normalized = normalizeProducts(extraction.products);
+      if (extraction.rejectionStats) {
+        rejectionStats.missingHref += extraction.rejectionStats.missingHref || 0;
+        rejectionStats.missingSku += extraction.rejectionStats.missingSku || 0;
+        rejectionStats.missingSalePrice += extraction.rejectionStats.missingSalePrice || 0;
+        rejectionStats.missingTitle += extraction.rejectionStats.missingTitle || 0;
+      }
+      if (pageNum === 1 && Array.isArray(extraction.rejectedSamples)) {
+        for (const sample of extraction.rejectedSamples) {
+          if (rejectedSamples.length >= 3) break;
+          rejectedSamples.push(sample);
+        }
+      }
+
+      const { products: normalized } = normalizeProducts(extraction.products, {
+        rejectionStats,
+        rejectedSamples,
+        maxRejectedSamples: 3,
+        captureSamples: pageNum === 1,
+      });
 
       const uniqueProducts = [];
       for (const product of normalized) {
-        const key = product.productUrl;
+        const key = product.dedupKey || product.productUrl;
         const skuKey = product.sku;
         const alreadySeen = (key && seenUrls.has(key)) || (skuKey && seenSku.has(skuKey));
         if (alreadySeen) continue;
@@ -830,6 +919,17 @@ async function loadProductsByPagination(
   if (uiTotal && allProducts.length < uiTotal * 0.8) {
     const notes = [`uiTotal=${uiTotal}`, `products=${allProducts.length}`];
     debugPaths.push(...(await saveDebug(page, DEBUG_OUTPUT_DIR, `${store.slug}_final_low_coverage`, notes)));
+  }
+
+  console.log(
+    `[PA] rejection stats: missingHref=${rejectionStats.missingHref} missingSku=${rejectionStats.missingSku} missingSalePrice=${rejectionStats.missingSalePrice} missingTitle=${rejectionStats.missingTitle}`
+  );
+  if (rejectedSamples.length) {
+    console.log("[PA] rejectedSamples (page 1, up to 3):");
+    rejectedSamples.forEach((sample, idx) => {
+      console.log(`Sample ${idx + 1} reason=${sample.reason}`);
+      console.log(sample.outerHTML);
+    });
   }
 
   if (usedFacetAvailability) {
@@ -976,7 +1076,7 @@ async function extractProductsWithFallbacks(
   const sampleAnchorHref = metrics?.sampleAnchorHref ?? null;
 
   const primary = await extractProducts(page, pageNum);
-  const normalizedPrimary = normalizeProducts(primary.products);
+  const { products: normalizedPrimary } = normalizeProducts(primary.products);
 
   const shouldUseAnchorFallback =
     (normalizedPrimary.length === 0 && primary.tilesFound > 0) ||
@@ -1230,23 +1330,70 @@ async function extractProductsFromAnchors(page) {
   return { products, tilesFound, tileWithSkuCount, tileWithPricesCount, tileWithUrlCount };
 }
 
-function normalizeHref(href) {
+function normalizeHref(href, { keepSearch = false } = {}) {
   if (!href) return null;
   if (/ratings=reviews/i.test(href)) return null;
   try {
     const url = new URL(href, BASE_URL);
-    url.search = "";
+    if (!keepSearch) {
+      url.search = "";
+    }
     url.hash = "";
-    return `${url.origin}${url.pathname}`;
+    return `${url.origin}${url.pathname}${url.search}`;
   } catch (error) {
     return null;
   }
 }
 
-function normalizeProduct(product = {}) {
-  const productUrl = normalizeHref(
-    product.productUrl || product.href || product.url || product.link
+function stripPageParam(href) {
+  if (!href) return href;
+  try {
+    const url = new URL(href, BASE_URL);
+    url.searchParams.delete("page");
+    return `${url.origin}${url.pathname}${url.search}`;
+  } catch (error) {
+    return href;
+  }
+}
+
+function deriveSkuFromHref(href) {
+  if (!href) return null;
+  try {
+    const url = new URL(href, BASE_URL);
+    const skuParam = url.searchParams.get("skuId") || url.searchParams.get("sku");
+    if (skuParam) return skuParam.replace(/[^A-Za-z0-9]/g, "");
+    const pathMatch = url.pathname.match(/\/product\/([A-Za-z0-9]+)/i);
+    if (pathMatch) return pathMatch[1];
+  } catch (error) {
+    const paramMatch = href.match(/skuId=([A-Za-z0-9]+)/i);
+    if (paramMatch) return paramMatch[1];
+    const pathMatch = href.match(/\/product\/([A-Za-z0-9]+)/i);
+    if (pathMatch) return pathMatch[1];
+  }
+  return null;
+}
+
+function normalizeProduct(
+  product = {},
+  {
+    rejectionStats,
+    rejectedSamples,
+    maxRejectedSamples = 0,
+    captureSamples = false,
+  } = {}
+) {
+  const productUrl = stripPageParam(
+    normalizeHref(product.productUrl || product.href || product.url || product.link, {
+      keepSearch: true,
+    })
   );
+  const dedupKey =
+    productUrl ||
+    stripPageParam(
+      normalizeHref(product.rawHref || product.href || product.url || product.link, {
+        keepSearch: true,
+      })
+    );
   const name = (product.name || product.title || "").trim();
   const rawImageUrl = product.imageUrl || product.image || null;
   const imageUrl = rawImageUrl
@@ -1256,35 +1403,73 @@ function normalizeProduct(product = {}) {
     : null;
   const priceRegular = normalizePrice(product.priceRegular ?? product.price);
   const priceSale = normalizePrice(product.priceSale ?? product.price);
-  const sku = product.sku ?? null;
+  const sku = product.sku || deriveSkuFromHref(product.productUrl || product.rawHref);
 
-  if (!productUrl) return null;
-  if (!sku) return null;
-  if (priceSale === null) return null;
+  const recordRejection = (reason) => {
+    if (rejectionStats) {
+      rejectionStats[reason] = (rejectionStats[reason] || 0) + 1;
+    }
+    if (captureSamples && rejectedSamples && rejectedSamples.length < maxRejectedSamples) {
+      rejectedSamples.push({
+        reason,
+        outerHTML: product.tileOuterHTML,
+      });
+    }
+  };
+
+  if (!productUrl || !dedupKey) {
+    recordRejection("missingHref");
+    return null;
+  }
+  if (!name) {
+    recordRejection("missingTitle");
+    return null;
+  }
+  if (priceSale === null) {
+    recordRejection("missingSalePrice");
+    return null;
+  }
+  if (!sku && rejectionStats) {
+    rejectionStats.missingSku = (rejectionStats.missingSku || 0) + 1;
+  }
 
   return {
     name,
     imageUrl,
     productUrl,
-    sku,
+    sku: sku || null,
     priceRegular,
     priceSale,
+    dedupKey,
   };
 }
 
-function normalizeProducts(products = []) {
+function normalizeProducts(
+  products = [],
+  {
+    rejectionStats = null,
+    rejectedSamples = null,
+    maxRejectedSamples = 0,
+    captureSamples = false,
+  } = {}
+) {
   const seen = new Set();
   const out = [];
 
   for (const product of products) {
-    const normalized = normalizeProduct(product);
-    if (!normalized?.productUrl) continue;
-    if (seen.has(normalized.productUrl)) continue;
-    seen.add(normalized.productUrl);
+    const normalized = normalizeProduct(product, {
+      rejectionStats,
+      rejectedSamples,
+      maxRejectedSamples,
+      captureSamples,
+    });
+    if (!normalized?.dedupKey) continue;
+    if (seen.has(normalized.dedupKey)) continue;
+    seen.add(normalized.dedupKey);
     out.push(normalized);
   }
 
-  return out;
+  return { products: out };
 }
 
 function writeStoreOutput(store, products, storeSynced = true, tilesFound = 0) {
