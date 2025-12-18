@@ -11,13 +11,16 @@ const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
 const SALE_URL = withNrpp(SALE_BASE_URL);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
-const CONCURRENCY = Number(process.env.PA_CONCURRENCY ?? "1");
+const CONCURRENCY = Number(
+  process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
+);
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
 const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
 let activeBrowser = null;
 
-const PRODUCT_TILE_SELECTOR = "div.cc-product-card";
+const PRODUCT_TILE_SELECTOR =
+  "div.cc-product-card, [data-testid='product-card'], [data-testid='product-tile']";
 const PRODUCT_LINK_SELECTORS = [
   "[data-testid='product-tile'] a[href*='/product/']",
   "[data-testid='product-card'] a[href*='/product/']",
@@ -578,6 +581,10 @@ async function loadProductsByPagination(
       let productsOnPage = normalizeProducts(extractionMeta.products);
       let productCount = productsOnPage.length;
 
+      console.log(
+        `[PA] Page ${pageNum} tile diagnostics: tilesFound=${extractionMeta.tilesFound} tileWithSkuCount=${extractionMeta.tileWithSkuCount} tileWithPricesCount=${extractionMeta.tileWithPricesCount} tileWithUrlCount=${extractionMeta.tileWithUrlCount}`
+      );
+
       if (
         productsOnPage.length === 0 &&
         pageNum === 1 &&
@@ -602,6 +609,9 @@ async function loadProductsByPagination(
         productCount = productsOnPage.length;
         anchorMetrics = retryAnchorMetrics;
         extractionMeta = retryExtraction;
+        console.log(
+          `[PA] Page ${pageNum} retry tile diagnostics: tilesFound=${extractionMeta.tilesFound} tileWithSkuCount=${extractionMeta.tileWithSkuCount} tileWithPricesCount=${extractionMeta.tileWithPricesCount} tileWithUrlCount=${extractionMeta.tileWithUrlCount}`
+        );
       }
 
       if (pageNum === 1) {
@@ -861,6 +871,9 @@ async function extractProductsWithFallbacks(
       usedNetworkFallback: false,
       anchorsTotal: anchorFallback.tilesFound,
       tilesFound: primary.tilesFound,
+      tileWithSkuCount: anchorFallback.tileWithSkuCount,
+      tileWithPricesCount: anchorFallback.tileWithPricesCount,
+      tileWithUrlCount: anchorFallback.tileWithUrlCount,
       productAnchorsFound,
       sampleAnchorHref,
     };
@@ -872,6 +885,9 @@ async function extractProductsWithFallbacks(
     usedNetworkFallback: false,
     anchorsTotal: primary.tilesFound,
     tilesFound: primary.tilesFound,
+    tileWithSkuCount: primary.tileWithSkuCount,
+    tileWithPricesCount: primary.tileWithPricesCount,
+    tileWithUrlCount: primary.tileWithUrlCount,
     productAnchorsFound,
     sampleAnchorHref,
   };
@@ -879,7 +895,14 @@ async function extractProductsWithFallbacks(
 
 async function extractProducts(page, pageNum = 1) {
   console.log("🔍 Extracting products with Princess Auto card selectors...");
-  const { products, tilesFound, debugSample } = await page.evaluate(
+  const {
+    products,
+    tilesFound,
+    debugSample,
+    tileWithSkuCount,
+    tileWithPricesCount,
+    tileWithUrlCount,
+  } = await page.evaluate(
     ({ tileSelector, shouldSample }) => {
       const tiles = Array.from(document.querySelectorAll(tileSelector));
       const seen = new Set();
@@ -897,40 +920,56 @@ async function extractProducts(page, pageNum = 1) {
         }
       };
 
+      const tileStats = {
+        tileWithSkuCount: 0,
+        tileWithPricesCount: 0,
+        tileWithUrlCount: 0,
+      };
+
       let debugSample = null;
 
       for (const tile of tiles) {
-        const productLink = tile.querySelector(
+        const card =
+          tile.closest(".cc-product-card, .cc-product, li, .grid-item, [data-id]") || tile;
+
+        const productLink = card.querySelector(
           "a[href*='/product/']:not([href*='ratings=reviews'])"
         );
         const href = productLink?.getAttribute("href") || productLink?.href || null;
         const productUrl = normalizeUrl(href);
+        if (productUrl) tileStats.tileWithUrlCount += 1;
 
         const name =
-          tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+          card.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
           productLink?.textContent?.trim() ||
           null;
 
-        const imgEl = tile.querySelector("img.img-responsive");
-        const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
+        const imgEl =
+          card.querySelector("img[src]") || card.querySelector("[data-bind*='primarySmallImageURL']");
+        const imageUrl =
+          imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
 
-        const skuText = tile.querySelector("div.cc-product-sku-container")?.textContent || "";
-        const skuMatch = skuText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
+        const skuMatch = card.innerText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
         const sku = skuMatch ? skuMatch[1] : null;
+        if (sku) tileStats.tileWithSkuCount += 1;
 
         const priceRegularText =
-          tile.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
+          card.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
         const priceSaleText =
-          tile.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
+          card.querySelector(".cc-product-after-price")?.textContent?.trim() ||
+          card.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
+          null;
+
+        if (priceRegularText || priceSaleText) tileStats.tileWithPricesCount += 1;
 
         if (!debugSample && shouldSample) {
-          const inner = tile.innerHTML || "";
+          const inner = card.innerHTML || "";
           debugSample = {
             sampleTileInnerHTML: inner.slice(0, 500),
             sampleFoundHref: productUrl || href,
             sampleFoundName: name,
             sampleFoundImg: imageUrl,
-            sampleFoundSkuText: skuText || null,
+            sampleFoundSkuText: skuMatch?.[0] || null,
             sampleFoundBeforePrice: priceRegularText,
             sampleFoundAfterPrice: priceSaleText,
           };
@@ -950,12 +989,21 @@ async function extractProducts(page, pageNum = 1) {
         seen.add(productUrl);
       }
 
-      return { products, tilesFound: tiles.length, debugSample };
+      return {
+        products,
+        tilesFound: tiles.length,
+        debugSample,
+        tileWithSkuCount: tileStats.tileWithSkuCount,
+        tileWithPricesCount: tileStats.tileWithPricesCount,
+        tileWithUrlCount: tileStats.tileWithUrlCount,
+      };
     },
     { tileSelector: PRODUCT_TILE_SELECTOR, shouldSample: pageNum === 1 }
   );
 
-  console.log(`🧱 tilesFound=${tilesFound}`);
+  console.log(
+    `🧱 tilesFound=${tilesFound} tileWithSkuCount=${tileWithSkuCount} tileWithPricesCount=${tileWithPricesCount} tileWithUrlCount=${tileWithUrlCount}`
+  );
   console.log(`Products extracted: ${products.length}`);
   if (debugSample) {
     console.log("[PA] sampleTileInnerHTML", debugSample.sampleTileInnerHTML);
@@ -966,16 +1014,26 @@ async function extractProducts(page, pageNum = 1) {
     console.log("[PA] sampleFoundBeforePrice", debugSample.sampleFoundBeforePrice);
     console.log("[PA] sampleFoundAfterPrice", debugSample.sampleFoundAfterPrice);
   }
-  return { products, tilesFound };
+  return {
+    products,
+    tilesFound,
+    tileWithSkuCount,
+    tileWithPricesCount,
+    tileWithUrlCount,
+  };
 }
 
 async function extractProductsFromAnchors(page) {
-  const { products, tilesFound } = await page.evaluate(() => {
+  const { products, tilesFound, tileWithSkuCount, tileWithPricesCount, tileWithUrlCount } =
+    await page.evaluate(() => {
     const anchors = Array.from(
       document.querySelectorAll("a[href*='/product/']:not([href*='ratings=reviews'])")
     );
     const seen = new Set();
     const products = [];
+    let tileWithSkuCount = 0;
+    let tileWithPricesCount = 0;
+    let tileWithUrlCount = 0;
 
     const normalizeUrl = (href) => {
       if (!href || /ratings=reviews/i.test(href)) return null;
@@ -992,25 +1050,36 @@ async function extractProductsFromAnchors(page) {
     for (const anchor of anchors) {
       const href = anchor.getAttribute("href") || anchor.href || null;
       const productUrl = normalizeUrl(href);
+      if (productUrl) tileWithUrlCount += 1;
+
       if (!productUrl || seen.has(productUrl)) continue;
 
-      const card = anchor.closest("div.cc-product-card");
+      const card =
+        anchor.closest(".cc-product-card, .cc-product, li, .grid-item, [data-id]") || anchor;
       const name =
         card?.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
         anchor.textContent?.trim() ||
         null;
 
-      const imgEl = card?.querySelector("img.img-responsive") || null;
-      const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
+      const imgEl =
+        card?.querySelector("img[src]") || card?.querySelector("[data-bind*='primarySmallImageURL']") ||
+        null;
+      const imageUrl =
+        imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
 
       const priceRegularText =
-        card?.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
+        card?.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
       const priceSaleText =
-        card?.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
+        card?.querySelector(".cc-product-after-price")?.textContent?.trim() ||
+        card?.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
+        null;
 
-      const skuText = card?.querySelector("div.cc-product-sku-container")?.textContent || "";
-      const skuMatch = skuText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
+      if (priceRegularText || priceSaleText) tileWithPricesCount += 1;
+
+      const skuMatch = card?.innerText?.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
       const sku = skuMatch ? skuMatch[1] : null;
+      if (sku) tileWithSkuCount += 1;
+      if (!sku) continue;
 
       products.push({
         productUrl,
@@ -1024,10 +1093,16 @@ async function extractProductsFromAnchors(page) {
       seen.add(productUrl);
     }
 
-    return { products, tilesFound: anchors.length };
+    return {
+      products,
+      tilesFound: anchors.length,
+      tileWithSkuCount,
+      tileWithPricesCount,
+      tileWithUrlCount,
+    };
   });
 
-  return { products, tilesFound };
+  return { products, tilesFound, tileWithSkuCount, tileWithPricesCount, tileWithUrlCount };
 }
 
 function normalizeHref(href) {
@@ -1059,6 +1134,7 @@ function normalizeProduct(product = {}) {
   }
 
   if (!productUrl) return null;
+  if (!sku) return null;
 
   return {
     name,
