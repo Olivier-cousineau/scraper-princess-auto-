@@ -325,42 +325,64 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   console.log(`Setting store using Locations page => postal=${postal} city=${city}`);
 
-  await page.goto(
-    `https://www.princessauto.com/en/locations?origin=header&initialPostalCode=${encodeURIComponent(postal)}`,
-    { waitUntil: "domcontentloaded" }
-  );
+  await page.goto("https://www.princessauto.com/en/locations?origin=header", {
+    waitUntil: "domcontentloaded",
+  });
 
   await dismissMakeStoreModal(page);
 
   const input = page.locator("#addressInput").first();
-  if (await input.count()) {
-    await input.click();
-    await input.press("Control+A").catch(() => {});
-    await input.type(postal, { delay: 35 });
-    await input.press("Enter").catch(() => {});
-    await input.press("Tab").catch(() => {});
-  }
-  await page.waitForTimeout(1200);
+  await input.waitFor({ state: "visible", timeout: 15000 });
 
-  const storeCard = page.locator(
-    '[data-testid*="store"], .store, .store-card, .location, .location-card, a[href*="/locations/"]'
-  );
+  await input.click();
+  await input.press("Control+A").catch(() => {});
+  await input.type(city, { delay: 40 });
+  await page.waitForTimeout(350);
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_type")));
 
-  await storeCard.first().waitFor({ state: "visible", timeout: 20000 });
-
-  let targetCard = storeCard.filter({ hasText: new RegExp(city, "i") }).first();
-
-  if (!(await targetCard.count())) targetCard = storeCard.first();
-
-  const makeBtn = targetCard
-    .getByRole("button", {
-      name: /faire\s+de\s+.*\s+mon\s+magasin|make\s+.*\s+my\s+store/i,
-    })
+  const suggestion = page
+    .locator(
+      "[role=\"option\"], .autocomplete li, .tt-suggestion, ul[role=\"listbox\"] li, .pac-item"
+    )
+    .filter({ hasText: new RegExp(city, "i") })
     .first();
 
-  await makeBtn.waitFor({ state: "visible", timeout: 15000 });
-  await makeBtn.click();
+  if (await suggestion.count()) {
+    await suggestion.click({ timeout: 3000 }).catch(() => {});
+  } else {
+    await page.keyboard.press("Enter").catch(() => {});
+  }
+  await page.waitForTimeout(1200);
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_suggestion")));
+
+  const makeBtns = page.getByRole("button", {
+    name: /faire\s+de\s+.*\s+mon\s+magasin|make\s+.*\s+my\s+store/i,
+  });
+
+  const firstMakeBtn = makeBtns.first();
+  try {
+    await firstMakeBtn.waitFor({ state: "visible", timeout: 25000 });
+  } catch (error) {
+    console.warn("⚠️ Make my store buttons did not become visible within timeout", error);
+  }
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_make_buttons")));
+
+  if (!(await makeBtns.count())) {
+    throw new Error("Make my store buttons not found on Locations page");
+  }
+
+  let target = makeBtns.first();
+
+  const scoped = page.locator("body").locator(":scope").filter({ hasText: new RegExp(city, "i") });
+  const inCity = scoped.getByRole("button", {
+    name: /faire\s+de\s+.*\s+mon\s+magasin|make\s+.*\s+my\s+store/i,
+  }).first();
+  if (await inCity.count()) target = inCity;
+
+  await target.click();
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_click_make_store")));
   await dismissMakeStoreModal(page);
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_modal_dismiss")));
 
   const saleLink = page.getByRole("link", { name: /vente|sale/i }).first();
   if (await saleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
