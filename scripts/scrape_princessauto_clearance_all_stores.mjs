@@ -134,6 +134,11 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
       }
     };
 
+    const buildUrlFromItemId = (itemId) => {
+      if (!itemId) return null;
+      return `https://www.princessauto.com/en/product/${itemId}`;
+    };
+
     const extractSkuFromHref = (href) => {
       if (!href) return null;
       try {
@@ -153,8 +158,8 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
       }
     };
 
-      const pickImageUrl = (el) => {
-        if (!el) return null;
+    const pickImageUrl = (el) => {
+      if (!el) return null;
       const candidates = [
         el.getAttribute("src"),
         el.getAttribute("data-src"),
@@ -170,12 +175,18 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
         .map((selector) => tile.querySelector(selector))
         .find(Boolean);
       const rawHref = link?.getAttribute("href") || link?.href || null;
-      const productUrl = normalizeUrl(rawHref);
+      const itemId =
+        tile.getAttribute("data-oe-item-id") ||
+        tile.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
+        null;
+      const productUrl = normalizeUrl(rawHref) || buildUrlFromItemId(itemId);
 
       const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
-      const sku = extractSkuFromHref(rawHref) || skuMatch?.[1] || null;
+      const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
+      const sku =
+        extractSkuFromHref(rawHref) || skuMatch?.[1] || skuFromItemId || itemId || null;
 
-      const uniqueKey = sku || productUrl || rawHref;
+      const uniqueKey = sku || productUrl || itemId || rawHref;
       const name =
         tile.getAttribute("data-oe-item-name") ||
         tile.querySelector("[data-oe-item-name]")?.getAttribute("data-oe-item-name") ||
@@ -187,12 +198,22 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
       const img = tile.querySelector("img");
       const imageUrl = pickImageUrl(img);
 
-      const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
-      const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
+      let priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
+      let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
 
-      const missingHref = !rawHref || !productUrl;
+      if (!priceRegularText) {
+        const dataRegular = parseFloat(tile.getAttribute("data-oe-item-list-price"));
+        if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
+      }
+
+      if (!priceSaleText) {
+        const dataSale = parseFloat(tile.getAttribute("data-oe-item-sale-price"));
+        if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
+      }
+
+      const missingHref = !rawHref && !itemId;
       const missingTitle = !name;
-      const missingSalePrice = !priceSaleText?.trim();
+      const missingSalePrice = !priceSaleText?.toString().trim();
       const missingSku = !sku;
 
       const rejected = !productUrl || !uniqueKey || seen.has(uniqueKey);
@@ -1140,6 +1161,11 @@ async function extractProducts(page, pageNum = 1) {
         }
       };
 
+      const buildUrlFromItemId = (itemId) => {
+        if (!itemId) return null;
+        return `https://www.princessauto.com/en/product/${itemId}`;
+      };
+
       const extractSkuFromHref = (href) => {
         if (!href) return null;
         try {
@@ -1175,11 +1201,16 @@ async function extractProducts(page, pageNum = 1) {
           "a[href*='/product/']:not([href*='ratings=reviews'])"
         );
         const href = productLink?.getAttribute("href") || productLink?.href || null;
-        const productUrl = normalizeUrl(href);
+        const itemId =
+          card.getAttribute("data-oe-item-id") ||
+          card.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
+          null;
+        const productUrl = normalizeUrl(href) || buildUrlFromItemId(itemId);
         if (productUrl) tileStats.tileWithUrlCount += 1;
 
         const name =
           card.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+          card.getAttribute("data-oe-item-name") ||
           productLink?.textContent?.trim() ||
           null;
 
@@ -1189,15 +1220,26 @@ async function extractProducts(page, pageNum = 1) {
           imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
 
         const skuMatch = card.innerText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-        const sku = extractSkuFromHref(href) || skuMatch?.[1] || null;
+        const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
+        const sku = extractSkuFromHref(href) || skuMatch?.[1] || skuFromItemId || itemId || null;
         if (sku) tileStats.tileWithSkuCount += 1;
 
-        const priceRegularText =
+        let priceRegularText =
           card.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
-        const priceSaleText =
+        let priceSaleText =
           card.querySelector(".cc-product-after-price")?.textContent?.trim() ||
           card.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
           null;
+
+        if (!priceRegularText) {
+          const dataRegular = parseFloat(card.getAttribute("data-oe-item-list-price"));
+          if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
+        }
+
+        if (!priceSaleText) {
+          const dataSale = parseFloat(card.getAttribute("data-oe-item-sale-price"));
+          if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
+        }
 
         if (priceRegularText || priceSaleText) tileStats.tileWithPricesCount += 1;
 
@@ -1214,7 +1256,7 @@ async function extractProducts(page, pageNum = 1) {
           };
         }
 
-        const uniqueKey = sku || productUrl || href;
+        const uniqueKey = sku || productUrl || itemId || href;
         if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
 
         products.push({
@@ -1294,8 +1336,13 @@ async function extractProductsFromAnchors(page) {
 
       const card =
         anchor.closest(".cc-product-card, .cc-product, li, .grid-item, [data-id]") || anchor;
+      const itemId =
+        card?.getAttribute("data-oe-item-id") ||
+        card?.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
+        null;
       const name =
         card?.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+        card?.getAttribute("data-oe-item-name") ||
         anchor.textContent?.trim() ||
         null;
 
@@ -1305,20 +1352,31 @@ async function extractProductsFromAnchors(page) {
       const imageUrl =
         imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
 
-      const priceRegularText =
+      let priceRegularText =
         card?.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
-      const priceSaleText =
+      let priceSaleText =
         card?.querySelector(".cc-product-after-price")?.textContent?.trim() ||
         card?.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
         null;
 
+      if (!priceRegularText) {
+        const dataRegular = parseFloat(card?.getAttribute("data-oe-item-list-price"));
+        if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
+      }
+
+      if (!priceSaleText) {
+        const dataSale = parseFloat(card?.getAttribute("data-oe-item-sale-price"));
+        if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
+      }
+
       if (priceRegularText || priceSaleText) tileWithPricesCount += 1;
 
       const skuMatch = card?.innerText?.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-      const sku = extractSkuFromHref(href) || skuMatch?.[1] || null;
+      const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
+      const sku = extractSkuFromHref(href) || skuMatch?.[1] || skuFromItemId || itemId || null;
       if (sku) tileWithSkuCount += 1;
 
-      const uniqueKey = sku || productUrl || href;
+      const uniqueKey = sku || productUrl || itemId || href;
       if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
 
       products.push({
