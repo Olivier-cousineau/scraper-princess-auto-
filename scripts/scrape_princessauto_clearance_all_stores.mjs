@@ -28,6 +28,25 @@ const PRODUCT_LINK_SELECTORS = [
   "a[href*='/p/']",
 ];
 
+function extractSkuFromUrl(href) {
+  if (!href) return null;
+  try {
+    const u = new URL(href, BASE_URL);
+    const skuId = u.searchParams.get("skuId");
+    if (skuId && /^\d+$/.test(skuId)) return skuId;
+
+    const pa = u.pathname.match(/\/PA\d{10,}/i);
+    if (pa) return pa[0].replace("/", "");
+
+    const digits = u.pathname.match(/(\d{6,10})/);
+    if (digits) return digits[1];
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function withInStoreFacet(url) {
   const u = new URL(url);
   u.searchParams.set("facet.availability", "56");
@@ -108,8 +127,27 @@ async function extractProductsFromSalePage(page) {
       }
     };
 
-    const pickImageUrl = (el) => {
-      if (!el) return null;
+    const extractSkuFromHref = (href) => {
+      if (!href) return null;
+      try {
+        const u = new URL(href, document.baseURI);
+        const skuId = u.searchParams.get("skuId");
+        if (skuId && /^\d+$/.test(skuId)) return skuId;
+
+        const pa = u.pathname.match(/\/PA\d{10,}/i);
+        if (pa) return pa[0].replace("/", "");
+
+        const digits = u.pathname.match(/(\d{6,10})/);
+        if (digits) return digits[1];
+
+        return null;
+      } catch (error) {
+        return null;
+      }
+    };
+
+      const pickImageUrl = (el) => {
+        if (!el) return null;
       const candidates = [
         el.getAttribute("src"),
         el.getAttribute("data-src"),
@@ -126,7 +164,12 @@ async function extractProductsFromSalePage(page) {
         .find(Boolean);
       const rawHref = link?.getAttribute("href") || link?.href || null;
       const productUrl = normalizeUrl(rawHref);
-      if (!productUrl || seen.has(productUrl)) continue;
+
+      const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
+      const sku = extractSkuFromHref(rawHref) || skuMatch?.[1] || null;
+
+      const uniqueKey = sku || productUrl || rawHref;
+      if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
 
       const name =
         tile.getAttribute("data-oe-item-name") ||
@@ -138,9 +181,6 @@ async function extractProductsFromSalePage(page) {
 
       const img = tile.querySelector("img");
       const imageUrl = pickImageUrl(img);
-
-      const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
-      const sku = skuMatch?.[1] || null;
 
       const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
       const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
@@ -154,7 +194,7 @@ async function extractProductsFromSalePage(page) {
         priceSale: priceSaleText,
       });
 
-      seen.add(productUrl);
+      seen.add(uniqueKey);
     }
 
     return { products, tilesFound: tiles.length };
@@ -752,7 +792,6 @@ async function loadProductsByPagination(
 ) {
   const allProducts = [];
   const seenUrls = new Set();
-  const seenSku = new Set();
   let zeroGainStreak = 0;
   let totalTilesFound = 0;
   let uiTotal = null;
@@ -777,12 +816,10 @@ async function loadProductsByPagination(
 
       const uniqueProducts = [];
       for (const product of normalized) {
-        const key = product.productUrl;
-        const skuKey = product.sku;
-        const alreadySeen = (key && seenUrls.has(key)) || (skuKey && seenSku.has(skuKey));
-        if (alreadySeen) continue;
+        const key =
+          product.sku || extractSkuFromUrl(product.productUrl) || product.productUrl || null;
+        if (key && seenUrls.has(key)) continue;
         if (key) seenUrls.add(key);
-        if (skuKey) seenSku.add(skuKey);
         uniqueProducts.push(product);
       }
 
@@ -1045,6 +1082,25 @@ async function extractProducts(page, pageNum = 1) {
         }
       };
 
+      const extractSkuFromHref = (href) => {
+        if (!href) return null;
+        try {
+          const u = new URL(href, document.baseURI);
+          const skuId = u.searchParams.get("skuId");
+          if (skuId && /^\d+$/.test(skuId)) return skuId;
+
+          const pa = u.pathname.match(/\/PA\d{10,}/i);
+          if (pa) return pa[0].replace("/", "");
+
+          const digits = u.pathname.match(/(\d{6,10})/);
+          if (digits) return digits[1];
+
+          return null;
+        } catch (error) {
+          return null;
+        }
+      };
+
       const tileStats = {
         tileWithSkuCount: 0,
         tileWithPricesCount: 0,
@@ -1075,7 +1131,7 @@ async function extractProducts(page, pageNum = 1) {
           imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
 
         const skuMatch = card.innerText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-        const sku = skuMatch ? skuMatch[1] : null;
+        const sku = extractSkuFromHref(href) || skuMatch?.[1] || null;
         if (sku) tileStats.tileWithSkuCount += 1;
 
         const priceRegularText =
@@ -1100,7 +1156,8 @@ async function extractProducts(page, pageNum = 1) {
           };
         }
 
-        if (!productUrl || !sku || seen.has(productUrl)) continue;
+        const uniqueKey = sku || productUrl || href;
+        if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
 
         products.push({
           name,
@@ -1111,7 +1168,7 @@ async function extractProducts(page, pageNum = 1) {
           priceSale: priceSaleText,
         });
 
-        seen.add(productUrl);
+        seen.add(uniqueKey);
       }
 
       return {
@@ -1177,8 +1234,6 @@ async function extractProductsFromAnchors(page) {
       const productUrl = normalizeUrl(href);
       if (productUrl) tileWithUrlCount += 1;
 
-      if (!productUrl || seen.has(productUrl)) continue;
-
       const card =
         anchor.closest(".cc-product-card, .cc-product, li, .grid-item, [data-id]") || anchor;
       const name =
@@ -1202,9 +1257,11 @@ async function extractProductsFromAnchors(page) {
       if (priceRegularText || priceSaleText) tileWithPricesCount += 1;
 
       const skuMatch = card?.innerText?.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-      const sku = skuMatch ? skuMatch[1] : null;
+      const sku = extractSkuFromHref(href) || skuMatch?.[1] || null;
       if (sku) tileWithSkuCount += 1;
-      if (!sku) continue;
+
+      const uniqueKey = sku || productUrl || href;
+      if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
 
       products.push({
         productUrl,
@@ -1215,7 +1272,7 @@ async function extractProductsFromAnchors(page) {
         sku,
       });
 
-      seen.add(productUrl);
+      seen.add(uniqueKey);
     }
 
     return {
@@ -1256,10 +1313,12 @@ function normalizeProduct(product = {}) {
     : null;
   const priceRegular = normalizePrice(product.priceRegular ?? product.price);
   const priceSale = normalizePrice(product.priceSale ?? product.price);
-  const sku = product.sku ?? null;
+  const productIdFromUrl = extractSkuFromUrl(
+    product.productUrl || product.href || product.url || product.link
+  );
+  const sku = product.sku ?? productIdFromUrl ?? null;
 
   if (!productUrl) return null;
-  if (!sku) return null;
   if (priceSale === null) return null;
 
   return {
@@ -1277,10 +1336,13 @@ function normalizeProducts(products = []) {
   const out = [];
 
   for (const product of products) {
-    const normalized = normalizeProduct(product);
+    const rawHref = product.productUrl || product.href || product.url || product.link || null;
+    const productIdFromUrl = extractSkuFromUrl(rawHref);
+    const normalized = normalizeProduct({ ...product, productIdFromUrl });
     if (!normalized?.productUrl) continue;
-    if (seen.has(normalized.productUrl)) continue;
-    seen.add(normalized.productUrl);
+    const key = normalized.sku || productIdFromUrl || normalized.productUrl || rawHref;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
     out.push(normalized);
   }
 
