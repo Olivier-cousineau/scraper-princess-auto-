@@ -214,47 +214,6 @@ async function getProductTileCount(page) {
   }, PRODUCT_TILE_SELECTOR, PRODUCT_LINK_SELECTORS);
 }
 
-async function waitForGridChange(page, previousHref, previousCount) {
-  const contentChangeDetected = await page
-    .waitForFunction(
-      ({ tileSelector, linkSelectors, prevHref, prevCount }) => {
-        const tiles = Array.from(document.querySelectorAll(tileSelector)).filter((tile) =>
-          linkSelectors.some((selector) => tile.querySelector(selector))
-        );
-        if (tiles.length === 0) return false;
-
-        const firstAnchor = linkSelectors
-          .map((selector) => tiles[0].querySelector(selector))
-          .find(Boolean);
-        const href = firstAnchor?.getAttribute("href") || firstAnchor?.href || null;
-        let normalizedHref = null;
-        if (href) {
-          try {
-            normalizedHref = new URL(href, document.baseURI).href.split("#")[0];
-          } catch (error) {
-            normalizedHref = null;
-          }
-        }
-
-        return (normalizedHref && normalizedHref !== prevHref) || tiles.length !== prevCount;
-      },
-      { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS, prevHref: previousHref, prevCount: previousCount },
-      { timeout: 15000 }
-    )
-    .catch(() => false);
-
-  if (!contentChangeDetected) {
-    await page
-      .waitForResponse(
-        (resp) => /search|product/i.test(resp.url()) && resp.request().method() === "GET",
-        { timeout: 10000 }
-      )
-      .catch(() => null);
-  }
-
-  return contentChangeDetected;
-}
-
 async function dismissMakeStoreModal(page) {
   const modal = page.locator("#makeStoreModal");
   if (!(await modal.count())) return;
@@ -285,30 +244,65 @@ async function dismissMakeStoreModal(page) {
   await modal.waitFor({ state: "hidden", timeout: 8000 }).catch(() => {});
 }
 
-async function clickNextAndWaitForChange(page, previousHref, previousCount) {
-  const nextBtn = page
+async function clickConstructorNext(page) {
+  const listSel = "#cio-results-list, .cio-search-result-list, .cio-search-result-list-container";
+  const itemSel = `${listSel} a.cio-search-result[href]`;
+
+  const firstHref = async () => await page.locator(itemSel).first().getAttribute("href");
+  const beforeFirst = await firstHref();
+  const beforeCount = await page.locator(itemSel).count();
+
+  const activePageLocator = page
     .locator(
-      "a[aria-label='Next'], button[aria-label='Next'], a[rel='next'], .pagination-next a, .pagination-next button, a:has-text('Next'), button:has-text('Next')"
+      "li[aria-current='page'], button[aria-current='page'], a[aria-current='page'], .cc-pagination-button.cc-active, .cc-pagination-button.cc-current"
     )
     .first();
+  const activePageValue = async () => {
+    if (!(await activePageLocator.count())) return null;
+    const aria = await activePageLocator.getAttribute("aria-label");
+    if (aria) return aria;
+    const text = await activePageLocator.textContent();
+    if (text) return text.trim();
+    return await activePageLocator.getAttribute("class");
+  };
+  const beforeActive = await activePageValue();
 
-  if (!(await nextBtn.count())) {
-    return { clicked: false, changed: false };
+  const nextA = page.locator("li.cio-search-page-next a[aria-label*='next']").first();
+  const nextSpan = page.locator("span.cc-pagination-button.cc-next").first();
+
+  const nextLi = page.locator("li.cio-search-page-next").first();
+  const liClass = (await nextLi.getAttribute("class")) || "";
+  if (/disabled/i.test(liClass)) return { moved: false, reason: "next_disabled" };
+
+  if (await nextA.count()) {
+    await nextA.scrollIntoViewIfNeeded().catch(() => {});
+    await nextA.click({ timeout: 10000 }).catch(async () => {
+      await page.evaluate((el) => el.click(), await nextA.elementHandle());
+    });
+  } else if (await nextSpan.count()) {
+    await nextSpan.scrollIntoViewIfNeeded().catch(() => {});
+    await nextSpan.click({ timeout: 10000 }).catch(async () => {
+      await page.evaluate((el) => el.click(), await nextSpan.elementHandle());
+    });
+  } else {
+    return { moved: false, reason: "next_not_found" };
   }
 
-  console.log("🔘 Clicking Next pagination control");
+  let moved = false;
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(500);
+    const afterFirst = await firstHref();
+    const afterCount = await page.locator(itemSel).count();
+    const afterActive = await activePageValue();
 
-  const [contentChanged] = await Promise.all([
-    waitForGridChange(page, previousHref, previousCount),
-    page
-      .waitForResponse((resp) => /search|product/i.test(resp.url()), { timeout: 15000 })
-      .catch(() => null),
-    nextBtn.click({ timeout: 10000 }),
-  ]);
+    if ((afterFirst && afterFirst !== beforeFirst) || afterActive !== beforeActive) {
+      moved = true;
+      console.log(`[PA] Next OK: firstHref changed, count=${beforeCount}->${afterCount}`);
+      break;
+    }
+  }
 
-  await page.waitForLoadState("networkidle").catch(() => {});
-
-  return { clicked: true, changed: contentChanged !== false };
+  return { moved, reason: moved ? "ok" : "no_change" };
 }
 
 async function navigateToSale(page) {
@@ -549,24 +543,10 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         break;
       }
 
-      const { clicked: nextClicked, changed: gridChanged } =
-        await clickNextAndWaitForChange(
-          page,
-          firstProductHref,
-          productCount || (await getProductTileCount(page))
-        );
+      const { moved, reason } = await clickConstructorNext(page);
 
-      if (!nextClicked) {
-        console.log(
-          `🛑 Stop pagination: Next control unavailable or grid unchanged on page ${pageNum}`
-        );
-        break;
-      }
-
-      if (!gridChanged && !usedDomFallback) {
-        console.log(
-          `🛑 Stop pagination: Next control unavailable or grid unchanged on page ${pageNum}`
-        );
+      if (!moved) {
+        console.log(`[PA] Stop pagination: ${reason}`);
         break;
       }
 
