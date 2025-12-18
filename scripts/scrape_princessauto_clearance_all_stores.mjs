@@ -1123,18 +1123,19 @@ function normalizeProduct(product = {}) {
     product.productUrl || product.href || product.url || product.link
   );
   const name = (product.name || product.title || "").trim();
-  const imageUrl = product.imageUrl || product.image || null;
-  let priceRegular = normalizePrice(product.priceRegular ?? product.price);
-  let priceSale = normalizePrice(product.priceSale ?? product.price);
+  const rawImageUrl = product.imageUrl || product.image || null;
+  const imageUrl = rawImageUrl
+    ? rawImageUrl.startsWith("//")
+      ? `${BASE_URL}${rawImageUrl}`
+      : rawImageUrl
+    : null;
+  const priceRegular = normalizePrice(product.priceRegular ?? product.price);
+  const priceSale = normalizePrice(product.priceSale ?? product.price);
   const sku = product.sku ?? null;
-
-  if (priceSale === null && priceRegular !== null) {
-    priceSale = priceRegular;
-    priceRegular = null;
-  }
 
   if (!productUrl) return null;
   if (!sku) return null;
+  if (priceSale === null) return null;
 
   return {
     name,
