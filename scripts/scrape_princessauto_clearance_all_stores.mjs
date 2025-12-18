@@ -17,8 +17,7 @@ const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
 let activeBrowser = null;
 
-const PRODUCT_TILE_SELECTOR =
-  "[data-testid='product-tile'], [data-testid='product-card'], article[data-product-id], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item";
+const PRODUCT_TILE_SELECTOR = "div.cc-product-card";
 const PRODUCT_LINK_SELECTORS = [
   "[data-testid='product-tile'] a[href*='/product/']",
   "[data-testid='product-card'] a[href*='/product/']",
@@ -901,32 +900,26 @@ async function extractProducts(page, pageNum = 1) {
       let debugSample = null;
 
       for (const tile of tiles) {
-        const productLink = Array.from(tile.querySelectorAll("a[href*='/product/']")).find(
-          (a) => !/ratings=reviews/i.test(a.getAttribute("href") || "")
-        );
+        const productLink = tile.querySelector("a[id^='CC-product-title-']");
         const href = productLink?.getAttribute("href") || productLink?.href || null;
         const productUrl = normalizeUrl(href);
 
         const name =
           tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
-          tile.querySelector("span[data-bind*='displayName']")?.textContent?.trim() ||
           productLink?.textContent?.trim() ||
           null;
 
-        const imgEl = tile.querySelector("img");
+        const imgEl = tile.querySelector("img.img-responsive");
         const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
-        const skuText = tile.querySelector(".cc-product-sku-container")?.textContent || "";
+        const skuText = tile.querySelector("div.cc-product-sku-container")?.textContent || "";
         const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
         const sku = skuMatch ? skuMatch[1] : null;
 
         const priceRegularText =
-          tile.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
-        let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent?.trim() || null;
-        if (!priceSaleText) {
-          const singlePrice = tile.querySelector(".cc-product-price")?.textContent?.trim() || null;
-          if (singlePrice) priceSaleText = singlePrice;
-        }
+          tile.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
+        const priceSaleText =
+          tile.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
 
         if (!debugSample && shouldSample) {
           const inner = tile.innerHTML || "";
@@ -941,7 +934,7 @@ async function extractProducts(page, pageNum = 1) {
           };
         }
 
-        if (!productUrl || seen.has(productUrl)) continue;
+        if (!productUrl || !sku || seen.has(productUrl)) continue;
 
         products.push({
           name,
@@ -976,14 +969,12 @@ async function extractProducts(page, pageNum = 1) {
 
 async function extractProductsFromAnchors(page) {
   const { products, tilesFound } = await page.evaluate(() => {
-    const anchors = Array.from(
-      document.querySelectorAll("a[href*='/product/']:not([href*='ratings=reviews'])")
-    );
+    const tiles = Array.from(document.querySelectorAll("div.cc-product-card"));
     const seen = new Set();
     const products = [];
 
     const normalizeUrl = (href) => {
-      if (!href) return null;
+      if (!href || /ratings=reviews/i.test(href)) return null;
       try {
         const url = new URL(href, document.baseURI);
         url.search = "";
@@ -994,41 +985,30 @@ async function extractProductsFromAnchors(page) {
       }
     };
 
-    for (const anchor of anchors) {
-      const href = anchor.getAttribute("href") || anchor.href || "";
+    for (const tile of tiles) {
+      const productLink = tile.querySelector("a[id^='CC-product-title-']");
+      const href = productLink?.getAttribute("href") || productLink?.href || null;
       const productUrl = normalizeUrl(href);
       if (!productUrl || seen.has(productUrl)) continue;
 
-      const tile = anchor.closest("[data-testid='product-tile'], [data-testid='product-card'], article[data-product-id], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item");
-      const cardCandidate =
-        tile ||
-        anchor.closest(".cc-product-card, .product-tile, .product-card, [data-oe-item-id]") ||
-        anchor.closest("div, li, article");
-      const imgCandidate =
-        cardCandidate?.querySelector("img") ||
-        tile?.querySelector("img") ||
-        anchor.parentElement?.querySelector("img") ||
-        anchor.nextElementSibling?.querySelector?.("img") ||
-        anchor.previousElementSibling?.querySelector?.("img") ||
-        anchor.closest("div, li, article")?.querySelector?.("img");
-
-      const imageUrl =
-        imgCandidate?.getAttribute("src") || imgCandidate?.getAttribute("data-src") || null;
-
-      const name = anchor.textContent?.trim() || null;
-
-      const priceRegularText =
-        cardCandidate?.querySelector?.(".cc-product-before-price")?.textContent?.trim() || null;
-      let priceSaleText =
-        cardCandidate?.querySelector?.(".cc-product-after-price")?.textContent?.trim() ||
-        cardCandidate?.querySelector?.(".cc-product-price")?.textContent?.trim() ||
+      const name =
+        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+        productLink?.textContent?.trim() ||
         null;
 
-      const skuFromAttr = cardCandidate?.getAttribute("data-oe-item-id") || null;
-      const skuText =
-        cardCandidate?.querySelector(".cc-product-sku-container")?.textContent || "";
+      const imgEl = tile.querySelector("img.img-responsive");
+      const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
+
+      const priceRegularText =
+        tile.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
+      const priceSaleText =
+        tile.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
+
+      const skuText = tile.querySelector("div.cc-product-sku-container")?.textContent || "";
       const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
-      const sku = skuFromAttr || (skuMatch ? skuMatch[1] : null);
+      const sku = skuMatch ? skuMatch[1] : null;
+
+      if (!sku) continue;
 
       products.push({
         productUrl,
@@ -1042,7 +1022,7 @@ async function extractProductsFromAnchors(page) {
       seen.add(productUrl);
     }
 
-    return { products, tilesFound: anchors.length };
+    return { products, tilesFound: tiles.length };
   });
 
   return { products, tilesFound };
@@ -1146,9 +1126,9 @@ function writeStoreOutput(store, products, storeSynced = true, tilesFound = 0) {
   const withSalePriceCount = normalizedProducts.filter((p) => p.priceSale !== null).length;
 
   console.log(`tilesFound=${tilesFound}`);
-  console.log(`uniqueProducts=${normalizedProducts.length}`);
   console.log(`withSkuCount=${withSkuCount}`);
   console.log(`withSalePriceCount=${withSalePriceCount}`);
+  console.log(`writtenProducts=${normalizedProducts.length}`);
   console.log(`wroteCsvPath=${csvFile}`);
   console.log(`wroteJsonPath=${outputFile}`);
 
