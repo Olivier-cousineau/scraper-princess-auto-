@@ -243,219 +243,132 @@ async function navigateToSale(page) {
   await waitForProductsGrid(page);
 }
 
-async function setMyStore(page, store) {
-  const storeLabel = store.storeName || store.name || store.slug || store.city;
-  console.log(`Setting My Store => ${storeLabel}`);
+function escapeRegex(text = "") {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  const trigger = page.locator("text=My Store").first();
+function getCityOrPostal(store) {
+  return (
+    store.city ||
+    store.postalCode ||
+    store.name ||
+    store.title ||
+    store.displayName ||
+    store.storeName ||
+    store.slug ||
+    ""
+  );
+}
+
+function getCityLabelForButton(store) {
+  const label =
+    store.city || store.name || store.title || store.displayName || store.storeName || store.slug || "";
+  return label.toUpperCase();
+}
+
+async function ensureOnSalePage(page) {
+  let recovered = false;
+  if (page.url().includes("/locations")) {
+    console.warn("⚠️ Detected /locations page; navigating back to Sale");
+    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+    recovered = true;
+  }
+
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(800);
+
+  const productSelectors = [
+    "a[href*='/product']",
+    "a[href*='/produit']",
+    "[data-testid*='product']",
+    ".product",
+  ];
+
+  let productVisible = false;
+  try {
+    await page.waitForSelector(productSelectors.join(", "), { timeout: 30000 });
+    const locator = page.locator(productSelectors.join(", ")).first();
+    productVisible = await locator.isVisible({ timeout: 500 }).catch(() => false);
+  } catch (error) {
+    productVisible = false;
+  }
+
+  return { recovered, productVisible };
+}
+
+async function setStoreThenGoToSale(page, store, debugPaths = []) {
+  const cityOrPostal = getCityOrPostal(store);
+  const cityLabelForButton = getCityLabelForButton(store);
+
+  console.log(`Setting store using UI flow => ${cityOrPostal}`);
+
+  await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
+
+  const triggerCandidates = [
+    page.getByRole("button", { name: /my store|magasin|store locator/i }).first(),
+    page.getByRole("link", { name: /my store|magasin|store locator/i }).first(),
+    page.locator("text=/My Store|Magasin|Store Locator/i").first(),
+  ];
+
+  let trigger = null;
+  for (const candidate of triggerCandidates) {
+    if (await candidate.isVisible({ timeout: 3000 }).catch(() => false)) {
+      trigger = candidate;
+      break;
+    }
+  }
+
+  if (!trigger) {
+    throw new Error("Could not find store locator trigger");
+  }
+
   await trigger.click({ timeout: 10000 });
 
   const modal = page.locator("[role='dialog'], .store-selector, .select-store");
   await modal.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
 
-  const searchInput = page
-    .locator(
-      "input[placeholder*='postal' i], input[placeholder*='city' i], input[type='search'], input[name*='store' i]"
-    )
-    .first();
-  if (await searchInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await searchInput.fill(store.storeId?.toString() || store.city || store.address || "");
-    await searchInput.press("Enter").catch(() => {});
-    await page.waitForTimeout(1500);
-  }
+  const searchInputCandidates = [
+    page.getByRole("textbox", { name: /postal|city|search/i }).first(),
+    page.locator("input[type='search'], input[placeholder*='postal' i], input[placeholder*='city' i]").first(),
+  ];
 
-  const candidates = [];
-  if (store.storeId) {
-    candidates.push(`[data-store-id='${store.storeId}']`);
-  }
-  if (store.address) {
-    candidates.push(`.store-item:has-text('${store.address}')`);
-  }
-  if (store.city) {
-    candidates.push(`.store-item:has-text('${store.city}')`);
-  }
-  candidates.push(`text=${store.name}`);
-
-  let storeOption = null;
-  for (const selector of candidates) {
-    const loc = page.locator(selector).first();
-    if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
-      storeOption = loc;
+  for (const input of searchInputCandidates) {
+    if (await input.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await input.fill(cityOrPostal);
       break;
     }
   }
 
-  if (storeOption) {
-    await storeOption.scrollIntoViewIfNeeded().catch(() => {});
-    await storeOption.click({ timeout: 10000 }).catch(() => {});
+  const searchButton = page.getByRole("button", { name: /rechercher|search/i }).first();
+  if (await searchButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await searchButton.click({ timeout: 10000 });
   }
 
-  const makeMyStoreButton = page
-    .locator("button:has-text('Set as My Store'), button:has-text('Make this my store'), text=Set as My Store")
-    .first();
-  if (await makeMyStoreButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await makeMyStoreButton.click({ timeout: 10000 });
-  }
-
-  const overlay = page.locator(
-    "[role='dialog'], .store-selector, .select-store, .modal, .overlay, [class*='modal' i], [class*='overlay' i]"
+  const makeMyStoreRegex = new RegExp(
+    `faire\\s+de\\s+${escapeRegex(cityLabelForButton)}\\s+mon\\s+magasin`,
+    "i"
   );
-  await overlay
-    .first()
-    .waitFor({ state: "hidden", timeout: 15000 })
-    .catch(() => {});
+  const makeMyStoreButton = page.getByRole("button", { name: makeMyStoreRegex }).first();
+  await makeMyStoreButton.click({ timeout: 20000 });
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_make_my_store")));
 
-  if (storeLabel) {
-    await page
-      .waitForFunction(
-        (expectedName) => {
-          const header = Array.from(
-            document.querySelectorAll("header, [data-testid='header'], [data-testid*='store' i]")
-          );
-          return header.some((el) => el.textContent?.toLowerCase().includes(expectedName));
-        },
-        storeLabel.toLowerCase(),
-        { timeout: 15000 }
-      )
-      .catch(() => {});
+  const okButton = page.getByRole("button", { name: /^ok$/i }).first();
+  await okButton.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+  if (await okButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await okButton.click({ timeout: 10000 }).catch(() => {});
   }
-}
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_ok")));
 
-
-async function ensureStoreSynced(page, store, debugPaths = [], attempt = 0) {
-  const storeLabel = store.storeName || store.name || store.slug || store.city;
-  await waitForStorePersistence(page, store).catch(() => {});
-  await page.waitForLoadState("networkidle").catch(() => {});
-
-  const indicatorMatches = await page
-    .evaluate(
-      (expectedName, cityName) => {
-        const normalize = (text) =>
-          (text || "")
-            .normalize("NFD")
-            .replace(/\p{Diacritic}/gu, "")
-            .toLowerCase()
-            .replace(/\s+/g, " ")
-            .trim();
-
-        const normalizedExpected = normalize(expectedName);
-        const normalizedCity = normalize(cityName);
-
-        if (!normalizedExpected && !normalizedCity) return true;
-
-        const candidates = Array.from(
-          document.querySelectorAll(
-            "header, [data-testid='header'], [data-testid*='store' i], [class*='store' i], nav"
-          )
-        );
-        const combinedText = normalize(
-          candidates
-            .map((el) => el.textContent || "")
-            .join(" \n ")
-        );
-
-        return (
-          (normalizedExpected && combinedText.includes(normalizedExpected)) ||
-          (normalizedCity && combinedText.includes(normalizedCity))
-        );
-      },
-      storeLabel,
-      store.city
-    )
-    .catch(() => false);
-
-  const myStoreMatches = await page
-    .evaluate(
-      (expectedName, cityName) => {
-        const normalize = (text) =>
-          (text || "")
-            .normalize("NFD")
-            .replace(/\p{Diacritic}/gu, "")
-            .toLowerCase()
-            .replace(/\s+/g, " ")
-            .trim();
-
-        const normalizedExpected = normalize(expectedName);
-        const normalizedCity = normalize(cityName);
-        if (!normalizedExpected && !normalizedCity) return true;
-
-        const myStoreCandidate = Array.from(
-          document.querySelectorAll(
-            "header *, [data-testid='header'] *, [data-testid*='store' i], [class*='store' i]"
-          )
-        ).find((el) => /my store/i.test(el.textContent || ""));
-        const labelText = normalize(myStoreCandidate?.textContent || "");
-        return (
-          (normalizedExpected && labelText.includes(normalizedExpected)) ||
-          (normalizedCity && labelText.includes(normalizedCity))
-        );
-      },
-      storeLabel,
-      store.city
-    )
-    .catch(() => false);
-
-  if (indicatorMatches && myStoreMatches) return true;
-
-  if (attempt >= 1) {
-    debugPaths.push(...(await captureDebug(page, store.slug, "store_sync_failed")));
-    console.warn(`⚠️ Store indicator mismatch persisted for ${store.slug}. Continuing with storeSynced=false.`);
-    return false;
+  const saleLink = page.getByRole("link", { name: /vente|sale/i }).first();
+  if (await saleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await saleLink.click({ timeout: 10000 }).catch(() => {});
+  } else {
+    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
   }
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_sale_click")));
 
-  console.warn(`⚠️ Store indicator did not match after selection for ${store.slug}. Retrying...`);
-  await setMyStore(page, store);
-  return ensureStoreSynced(page, store, debugPaths, attempt + 1);
-}
-
-async function waitForStorePersistence(page, store) {
-  const storeLabel = store.storeName || store.name || store.slug || store.city || "";
-  const normalizedExpected = normalizeText(storeLabel);
-  const normalizedCity = normalizeText(store.city || "");
-
-  if (!normalizedExpected && !normalizedCity) return;
-
-  await page
-    .waitForFunction(
-      ({ expected, city }) => {
-        const normalize = (text) =>
-          (text || "")
-            .normalize("NFD")
-            .replace(/\p{Diacritic}/gu, "")
-            .toLowerCase()
-            .replace(/\s+/g, " ")
-            .trim();
-
-        const haystacks = [];
-
-        try {
-          haystacks.push(normalize(document.cookie || ""));
-        } catch (error) {}
-
-        try {
-          const storageValues = [
-            ...Object.values(localStorage || {}),
-            ...Object.values(sessionStorage || {}),
-          ];
-          haystacks.push(normalize(storageValues.join("|")));
-        } catch (error) {}
-
-        const matchers = [expected, city].filter(Boolean);
-        return matchers.some((needle) => haystacks.some((h) => h.includes(needle)));
-      },
-      { expected: normalizedExpected, city: normalizedCity },
-      { timeout: 15000 }
-    )
-    .catch(() => {});
-}
-
-function normalizeText(text) {
-  return (text || "")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  await ensureOnSalePage(page);
 }
 
 
@@ -464,15 +377,32 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
   const seen = new Set();
   let prevSignature = null;
   let zeroGainStreak = 0;
+  let recoveredFromLocations = false;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
-      await page.waitForLoadState("domcontentloaded");
+      const { recovered, productVisible } = await ensureOnSalePage(page);
+      recoveredFromLocations = recoveredFromLocations || recovered;
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
-      const productsOnPage = await extractProducts(page);
-      const productCount = productsOnPage.length;
+      let productsOnPage = await extractProducts(page);
+      let productCount = productsOnPage.length;
+
+      if (
+        productsOnPage.length === 0 &&
+        pageNum === 1 &&
+        (recovered || recoveredFromLocations || !productVisible)
+      ) {
+        console.warn("⚠️ No products on first page after recovery attempt; retrying once...");
+        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+        await ensureOnSalePage(page);
+        await page.waitForLoadState("networkidle").catch(() => {});
+        await waitForProductsGrid(page);
+        productsOnPage = await extractProducts(page);
+        productCount = productsOnPage.length;
+      }
+
       const currentUrlNoHash = page.url().split("#")[0];
       const firstProductHref = productsOnPage[0]?.url || (await getFirstGridHref(page));
       const currentPageUrls = productsOnPage
@@ -776,13 +706,8 @@ async function processStore(page, store) {
   let storeSynced = true;
 
   try {
-    await navigateToSale(page);
-    await setMyStore(page, store);
-    const firstSync = await ensureStoreSynced(page, store, debugPaths);
-    storeSynced = storeSynced && firstSync !== false;
-    await navigateToSale(page);
-    const secondSync = await ensureStoreSynced(page, store, debugPaths);
-    storeSynced = storeSynced && secondSync !== false;
+    await setStoreThenGoToSale(page, store, debugPaths);
+    await ensureOnSalePage(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     const allProducts = await loadProductsByPagination(page, store, debugPaths);
     const resultsText = await page
@@ -812,11 +737,6 @@ async function processStore(page, store) {
       .catch(() => false);
 
     const isZeroLegit = hasNoResultsText || totalResultCount === 0;
-    if (!storeSynced) {
-      console.warn(
-        `⚠️ Store sync validation could not be confirmed for ${store.slug}. Proceeding with storeSynced=false.`
-      );
-    }
 
     const shouldKeepDebug = allProductsWithStore.length === 0 || !storeSynced;
 
