@@ -277,10 +277,18 @@ function escapeRegex(text = "") {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function extractPostalFromAddress(address = "") {
+  const postalMatch = address.match(/[A-Z]\d[A-Z]\s?\d[A-Z]\d/i);
+  return postalMatch ? postalMatch[0].toUpperCase().replace(/\s+/, " ") : null;
+}
+
 function getCityOrPostal(store) {
+  const postal =
+    store.postalCode || store.postal || store.zip || extractPostalFromAddress(store.address || "");
+
   return (
+    postal ||
     store.city ||
-    store.postalCode ||
     store.name ||
     store.title ||
     store.displayName ||
@@ -297,31 +305,22 @@ function getCityLabelForButton(store) {
 }
 
 async function submitStoreSearch(page) {
-  const btn = page.locator("button[data-testid='cio-submit-btn']").first();
+  const submit = page.locator("button[data-testid='cio-submit-btn']").first();
 
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
 
-  if (await btn.count()) {
+  if (await submit.count()) {
     try {
-      const handle = await btn.elementHandle();
+      const handle = await submit.elementHandle();
       if (handle) {
-        await page.waitForFunction((el) => el && !el.disabled, handle, { timeout: 5000 });
-        await btn.click();
-        await page.waitForTimeout(400);
+        await page.waitForFunction((el) => el && !el.disabled, handle, { timeout: 8000 });
+        await submit.click();
+        await page.waitForTimeout(800);
         return;
       }
     } catch {}
   }
-
-  const firstResultCard = page.locator("text=/abbotsford|kamloops/i").first();
-  if (await firstResultCard.count()) {
-    await firstResultCard.click({ timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(300);
-  }
-
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(400);
 }
 
 async function ensureOnSalePage(page) {
@@ -405,18 +404,20 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   await dismissMakeStoreModal(page);
   await page.waitForTimeout(200);
-  await searchInput.click();
-  await searchInput.fill(cityOrPostal);
+  await searchInput.click({ timeout: 10000 });
+  await searchInput.press("Control+A").catch(() => {});
+  await searchInput.type(cityOrPostal, { delay: 35 });
+  await searchInput.press("Tab").catch(() => {});
+  await page.waitForTimeout(400);
+
+  debugPaths.push(...(await captureDebug(page, store.slug, "after_store_search_type")));
 
   await submitStoreSearch(page);
 
-  const makeMyStoreRegex = new RegExp(
-    `faire\\s+de\\s+${escapeRegex(cityLabelForButton)}\\s+mon\\s+magasin`,
-    "i"
-  );
-  const makeMyStoreButton = page.getByRole("button", { name: makeMyStoreRegex }).first();
+  const makeMyStoreButtons = page.getByRole("button", { name: /faire\s+de\s+.*\s+mon\s+magasin/i });
 
-  let makeMyStoreReady = await makeMyStoreButton
+  let makeMyStoreReady = await makeMyStoreButtons
+    .first()
     .waitFor({ state: "visible", timeout: 15000 })
     .then(() => true)
     .catch(() => false);
@@ -425,11 +426,14 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
     console.warn("⚠️ Make My Store button not visible after first attempt; retrying search");
     await dismissMakeStoreModal(page);
     await page.waitForTimeout(200);
-    await searchInput.click();
-    await searchInput.fill("");
-    await searchInput.type(cityOrPostal, { delay: 30 }).catch(() => {});
+    await searchInput.click({ timeout: 10000 });
+    await searchInput.press("Control+A").catch(() => {});
+    await searchInput.type(cityOrPostal, { delay: 35 }).catch(() => {});
+    await searchInput.press("Tab").catch(() => {});
+    await page.waitForTimeout(400);
     await submitStoreSearch(page);
-    makeMyStoreReady = await makeMyStoreButton
+    makeMyStoreReady = await makeMyStoreButtons
+      .first()
       .waitFor({ state: "visible", timeout: 15000 })
       .then(() => true)
       .catch(() => false);
@@ -437,18 +441,37 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   if (!makeMyStoreReady) {
     const submitButton = page.locator("button[data-testid='cio-submit-btn']").first();
-    let disabledState = "not-found";
-    if (await submitButton.count()) {
-      disabledState = await submitButton.evaluate((el) => el.disabled).catch(() => "evaluation-failed");
-    }
+    const addressInput = page.locator("#addressInput");
+    const makeMyStoreCount = await makeMyStoreButtons.count();
+    const inputValue = await addressInput.inputValue().catch(() => "<unavailable>");
+    const submitDisabled = (await submitButton.evaluate((el) => el?.disabled).catch(() => null)) ??
+      "not-found";
+    const extraNotes = [
+      `addressInput.value=${inputValue}`,
+      `submit.disabled=${submitDisabled}`,
+      `url=${page.url()}`,
+      `makeMyStoreButtons.count=${makeMyStoreCount}`,
+    ];
     console.warn(
-      `⚠️ Make My Store button not resolved for ${cityLabelForButton}; submit disabled state: ${disabledState}`
+      `⚠️ Make My Store button not resolved for ${cityLabelForButton}; submit disabled state: ${submitDisabled}`
     );
-    debugPaths.push(...(await captureDebug(page, store.slug, "store_search_not_resolved")));
+    debugPaths.push(...(await captureDebug(page, store.slug, "after_store_submit_attempt")));
+    debugPaths.push(...(await captureDebug(page, store.slug, "store_search_not_resolved", { extraNotes })));
     throw new Error(`Make My Store button not available for ${cityLabelForButton}`);
   }
 
-  await makeMyStoreButton.click({ timeout: 20000 });
+  let makeMyStoreTarget = makeMyStoreButtons.first();
+  const preferredButton = page.getByRole("button", {
+    name: new RegExp(
+      `faire\\s+de\\s+${escapeRegex(store.city || cityLabelForButton || "")}\\s+mon\\s+magasin`,
+      "i"
+    ),
+  });
+  if (await preferredButton.count()) {
+    makeMyStoreTarget = preferredButton.first();
+  }
+
+  await makeMyStoreTarget.click({ timeout: 20000 });
   debugPaths.push(...(await captureDebug(page, store.slug, "after_make_my_store")));
 
   await dismissMakeStoreModal(page);
@@ -729,13 +752,18 @@ function writeStoreOutput(store, products, storeSynced = true) {
   return payload;
 }
 
-async function captureDebug(page, slug, stage) {
+async function captureDebug(page, slug, stage, options = {}) {
+  const { extraNotes = [] } = options;
   const htmlPath = path.join(DEBUG_OUTPUT_DIR, `pa_${slug}_${stage}.html`);
   const screenshotPath = path.join(DEBUG_OUTPUT_DIR, `pa_${slug}_${stage}.png`);
 
   try {
     const html = await page.content();
-    fs.writeFileSync(htmlPath, html, "utf8");
+    const htmlWithNotes =
+      extraNotes.length > 0
+        ? `${html}\n<!-- DEBUG NOTES:\n${extraNotes.join("\n")}\n-->`
+        : html;
+    fs.writeFileSync(htmlPath, htmlWithNotes, "utf8");
     await page.screenshot({ path: screenshotPath, fullPage: true });
     console.log(`📝 Saved debug HTML: ${htmlPath}`);
     console.log(`📸 Saved debug screenshot: ${screenshotPath}`);
