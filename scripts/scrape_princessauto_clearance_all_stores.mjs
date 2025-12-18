@@ -766,7 +766,7 @@ async function extractProductsWithFallbacks(page, jsonResponses = []) {
 
 async function extractProducts(page) {
   console.log("🔍 Extracting products with Princess Auto card selectors...");
-  const { products, tilesFound } = await page.evaluate(() => {
+  const { products, tilesFound, debugSample } = await page.evaluate(() => {
     const BASE = "https://www.princessauto.com";
     const tiles = Array.from(document.querySelectorAll("div.cc-product-card"));
     const seen = new Set();
@@ -784,30 +784,49 @@ async function extractProducts(page) {
       }
     };
 
-    for (const tile of tiles) {
-      const name =
-        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
-        null;
+    let debugSample = null;
 
-      const href =
-        tile.querySelector("a[id^='CC-product-title-']")?.getAttribute("href") || null;
+    for (const tile of tiles) {
+      const productLink = tile.querySelector(
+        "a[href*='/product/']:not([href*='ratings=reviews'])"
+      );
+      const href = productLink?.getAttribute("href") || null;
       const productUrl = normalizeUrl(href);
 
-      if (!productUrl || seen.has(productUrl)) continue;
+      const name =
+        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+        tile.querySelector("span[data-bind*='displayName']")?.textContent?.trim() ||
+        productLink?.textContent?.trim() ||
+        null;
 
-      const imgEl = tile.querySelector("img.cclazyLoaded");
+      const imgEl = tile.querySelector("img.cclazyLoaded, img.img-responsive");
       const imageUrl =
         imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
-      const skuText =
-        tile.querySelector(".cc-product-sku-container")?.textContent || "";
+      const skuText = tile.querySelector(".cc-product-sku-container")?.textContent || "";
       const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
       const sku = skuMatch ? skuMatch[1] : null;
 
       const priceRegularText =
         tile.querySelector(".cc-product-before-price")?.textContent || null;
-      const priceSaleText =
-        tile.querySelector(".cc-product-after-price")?.textContent || null;
+      let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || null;
+      if (!priceSaleText) {
+        const singlePrice = tile.querySelector(".cc-product-price")?.textContent || null;
+        if (singlePrice) priceSaleText = singlePrice;
+      }
+
+      if (!debugSample) {
+        debugSample = {
+          sampleProductUrl: productUrl,
+          sampleName: name,
+          sampleSkuText: skuText || null,
+          sampleBeforePriceText: priceRegularText,
+          sampleAfterPriceText: priceSaleText,
+          sampleImgSrc: imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null,
+        };
+      }
+
+      if (!productUrl || seen.has(productUrl)) continue;
 
       products.push({
         name,
@@ -821,11 +840,19 @@ async function extractProducts(page) {
       seen.add(productUrl);
     }
 
-    return { products, tilesFound: tiles.length };
+    return { products, tilesFound: tiles.length, debugSample };
   });
 
   console.log(`🧱 tilesFound=${tilesFound}`);
   console.log(`Products extracted: ${products.length}`);
+  if (debugSample) {
+    console.log("[PA] sampleProductUrl", debugSample.sampleProductUrl);
+    console.log("[PA] sampleName", debugSample.sampleName);
+    console.log("[PA] sampleSkuText", debugSample.sampleSkuText);
+    console.log("[PA] sampleBeforePriceText", debugSample.sampleBeforePriceText);
+    console.log("[PA] sampleAfterPriceText", debugSample.sampleAfterPriceText);
+    console.log("[PA] sampleImgSrc", debugSample.sampleImgSrc);
+  }
   return { products, tilesFound };
 }
 
