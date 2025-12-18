@@ -11,6 +11,8 @@ const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
 const SALE_URL = withNrpp(SALE_BASE_URL);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "40", 10);
+const DIAGNOSTIC_MODE =
+  process.env.PA_DIAGNOSTIC === "1" || process.env.DIAGNOSTIC_MODE === "1";
 const CONCURRENCY = Number(
   process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
 );
@@ -91,7 +93,7 @@ async function waitForDomStable(page, { timeoutMs = 12000 } = {}) {
 }
 
 async function extractProductsFromSalePage(page) {
-  return page.evaluate(({ tileSelector, linkSelectors }) => {
+  return page.evaluate(({ tileSelector, linkSelectors, diagnosticMode }) => {
     const tiles = Array.from(document.querySelectorAll(tileSelector));
     const seen = new Set();
     const products = [];
@@ -126,7 +128,8 @@ async function extractProductsFromSalePage(page) {
         .find(Boolean);
       const rawHref = link?.getAttribute("href") || link?.href || null;
       const productUrl = normalizeUrl(rawHref);
-      if (!productUrl || seen.has(productUrl)) continue;
+
+      if ((!productUrl || seen.has(productUrl)) && !diagnosticMode) continue;
 
       const name =
         tile.getAttribute("data-oe-item-name") ||
@@ -145,6 +148,8 @@ async function extractProductsFromSalePage(page) {
       const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
       const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
 
+      const tileHtml = diagnosticMode ? tile.outerHTML || "" : undefined;
+
       products.push({
         productUrl,
         name,
@@ -152,13 +157,16 @@ async function extractProductsFromSalePage(page) {
         sku,
         priceRegular: priceRegularText,
         priceSale: priceSaleText,
+        tileHtml,
       });
 
-      seen.add(productUrl);
+      if (productUrl) {
+        seen.add(productUrl);
+      }
     }
 
     return { products, tilesFound: tiles.length };
-  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS, diagnosticMode: DIAGNOSTIC_MODE });
 }
 
 async function goToNextPageUI(page) {
@@ -773,7 +781,20 @@ async function loadProductsByPagination(
 
       const extraction = await extractProductsFromSalePage(page);
       totalTilesFound += extraction.tilesFound || 0;
-      const normalized = normalizeProducts(extraction.products);
+      const diagnostics =
+        DIAGNOSTIC_MODE
+          ? {
+              missingHref: 0,
+              missingSku: 0,
+              missingSalePrice: 0,
+              missingTitle: 0,
+              rejectedSamples: [],
+            }
+          : null;
+      const normalized = normalizeProducts(extraction.products, {
+        diagnostics,
+        pageNum,
+      });
 
       const uniqueProducts = [];
       for (const product of normalized) {
@@ -801,6 +822,21 @@ async function loadProductsByPagination(
       console.log(
         `[PA] Page ${pageNum} tile diagnostics: tilesFound=${extraction.tilesFound}`
       );
+
+      if (diagnostics) {
+        console.log(
+          `[PA] Page ${pageNum} missingHref=${diagnostics.missingHref} missingSku=${diagnostics.missingSku} missingSalePrice=${diagnostics.missingSalePrice} missingTitle=${diagnostics.missingTitle}`
+        );
+
+        if (pageNum === 1 && diagnostics.rejectedSamples.length) {
+          console.log("[PA] Rejected tile samples (page 1):");
+          diagnostics.rejectedSamples.forEach((html, idx) => {
+            console.log(`--- rejectedSample#${idx + 1} ---`);
+            console.log(html);
+            console.log("--- end rejectedSample ---");
+          });
+        }
+      }
 
       if (uniqueProducts.length < 3) {
         zeroGainStreak += 1;
@@ -1272,13 +1308,40 @@ function normalizeProduct(product = {}) {
   };
 }
 
-function normalizeProducts(products = []) {
+function normalizeProducts(products = [], { diagnostics = null, pageNum = null, maxSamples = 3 } = {}) {
   const seen = new Set();
   const out = [];
+  const isPageOne = pageNum === 1;
 
   for (const product of products) {
+    const normalizedHref = normalizeHref(
+      product.productUrl || product.href || product.url || product.link
+    );
+    const normalizedPriceSale = normalizePrice(product.priceSale ?? product.price);
+    const sku = product.sku ?? null;
+    const name = (product.name || product.title || "").trim();
+
+    if (diagnostics) {
+      if (!normalizedHref) diagnostics.missingHref += 1;
+      if (!sku) diagnostics.missingSku += 1;
+      if (normalizedPriceSale === null) diagnostics.missingSalePrice += 1;
+      if (!name) diagnostics.missingTitle += 1;
+    }
+
     const normalized = normalizeProduct(product);
-    if (!normalized?.productUrl) continue;
+    if (!normalized?.productUrl) {
+      if (
+        diagnostics &&
+        isPageOne &&
+        diagnostics.rejectedSamples.length < maxSamples
+      ) {
+        const tileHtml =
+          product.tileHtml || product.tileHTML || product.outerHTML || "";
+        const sampleSource = tileHtml || JSON.stringify(product);
+        diagnostics.rejectedSamples.push(sampleSource.slice(0, 1200));
+      }
+      continue;
+    }
     if (seen.has(normalized.productUrl)) continue;
     seen.add(normalized.productUrl);
     out.push(normalized);
