@@ -509,7 +509,8 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
 
       const extractionMeta = await extractProductsWithFallbacks(
         page,
-        jsonResponses
+        jsonResponses,
+        pageNum
       );
       totalTilesFound += extractionMeta.tilesFound || 0;
       let productsOnPage = normalizeProducts(extractionMeta.products);
@@ -529,7 +530,8 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         await waitForProductsGrid(page);
         const retryExtraction = await extractProductsWithFallbacks(
           page,
-          jsonResponses
+          jsonResponses,
+          pageNum
         );
         totalTilesFound += retryExtraction.tilesFound || 0;
         productsOnPage = normalizeProducts(retryExtraction.products);
@@ -751,31 +753,143 @@ async function extractProductsFromConstructorDom(page) {
   return { products: normalized, anchorsTotal: normalized.length };
 }
 
-async function extractProductsWithFallbacks(page, jsonResponses = []) {
+async function extractProductsWithFallbacks(page, jsonResponses = [], pageNum = 1) {
   await preparePageForExtraction(page);
-  const { products, tilesFound } = await extractProducts(page);
+  const primary = await extractProducts(page, pageNum);
+  const normalizedPrimary = normalizeProducts(primary.products);
+
+  if (normalizedPrimary.length === 0 && primary.tilesFound > 0) {
+    console.warn("⚠️ Primary tile extraction returned 0 products; using anchor fallback");
+    const anchorFallback = await extractProductsFromAnchors(page);
+    console.log(
+      `FALLBACK_ANCHORS_USED=true anchorsFound=${anchorFallback.tilesFound} productsAfterDedup=${anchorFallback.products.length}`
+    );
+    return {
+      products: anchorFallback.products,
+      usedDomFallback: true,
+      usedNetworkFallback: false,
+      anchorsTotal: anchorFallback.tilesFound,
+      tilesFound: primary.tilesFound,
+    };
+  }
 
   return {
-    products,
+    products: primary.products,
     usedDomFallback: false,
     usedNetworkFallback: false,
-    anchorsTotal: tilesFound,
-    tilesFound,
+    anchorsTotal: primary.tilesFound,
+    tilesFound: primary.tilesFound,
   };
 }
 
-async function extractProducts(page) {
+async function extractProducts(page, pageNum = 1) {
   console.log("🔍 Extracting products with Princess Auto card selectors...");
-  const { products, tilesFound, debugSample } = await page.evaluate(() => {
-    const BASE = "https://www.princessauto.com";
-    const tiles = Array.from(document.querySelectorAll("div.cc-product-card"));
+  const { products, tilesFound, debugSample } = await page.evaluate(
+    ({ tileSelector, shouldSample }) => {
+      const tiles = Array.from(document.querySelectorAll(tileSelector));
+      const seen = new Set();
+      const products = [];
+
+      const normalizeUrl = (href) => {
+        if (!href || /ratings=reviews/i.test(href)) return null;
+        try {
+          const url = new URL(href, document.baseURI);
+          url.search = "";
+          url.hash = "";
+          return `${url.origin}${url.pathname}`;
+        } catch (error) {
+          return null;
+        }
+      };
+
+      let debugSample = null;
+
+      for (const tile of tiles) {
+        const productLink = Array.from(tile.querySelectorAll("a[href*='/product/']")).find(
+          (a) => !/ratings=reviews/i.test(a.getAttribute("href") || "")
+        );
+        const href = productLink?.getAttribute("href") || productLink?.href || null;
+        const productUrl = normalizeUrl(href);
+
+        const name =
+          tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+          tile.querySelector("span[data-bind*='displayName']")?.textContent?.trim() ||
+          productLink?.textContent?.trim() ||
+          null;
+
+        const imgEl = tile.querySelector("img");
+        const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
+
+        const skuText = tile.querySelector(".cc-product-sku-container")?.textContent || "";
+        const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
+        const sku = skuMatch ? skuMatch[1] : null;
+
+        const priceRegularText =
+          tile.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
+        let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent?.trim() || null;
+        if (!priceSaleText) {
+          const singlePrice = tile.querySelector(".cc-product-price")?.textContent?.trim() || null;
+          if (singlePrice) priceSaleText = singlePrice;
+        }
+
+        if (!debugSample && shouldSample) {
+          const inner = tile.innerHTML || "";
+          debugSample = {
+            sampleTileInnerHTML: inner.slice(0, 500),
+            sampleFoundHref: href,
+            sampleFoundName: name,
+            sampleFoundImg: imageUrl,
+            sampleFoundSkuText: skuText || null,
+            sampleFoundBeforePrice: priceRegularText,
+            sampleFoundAfterPrice: priceSaleText,
+          };
+        }
+
+        if (!productUrl || seen.has(productUrl)) continue;
+
+        products.push({
+          name,
+          imageUrl,
+          productUrl,
+          sku,
+          priceRegular: priceRegularText,
+          priceSale: priceSaleText,
+        });
+
+        seen.add(productUrl);
+      }
+
+      return { products, tilesFound: tiles.length, debugSample };
+    },
+    { tileSelector: PRODUCT_TILE_SELECTOR, shouldSample: pageNum === 1 }
+  );
+
+  console.log(`🧱 tilesFound=${tilesFound}`);
+  console.log(`Products extracted: ${products.length}`);
+  if (debugSample) {
+    console.log("[PA] sampleTileInnerHTML", debugSample.sampleTileInnerHTML);
+    console.log("[PA] sampleFoundHref", debugSample.sampleFoundHref);
+    console.log("[PA] sampleFoundName", debugSample.sampleFoundName);
+    console.log("[PA] sampleFoundImg", debugSample.sampleFoundImg);
+    console.log("[PA] sampleFoundSkuText", debugSample.sampleFoundSkuText);
+    console.log("[PA] sampleFoundBeforePrice", debugSample.sampleFoundBeforePrice);
+    console.log("[PA] sampleFoundAfterPrice", debugSample.sampleFoundAfterPrice);
+  }
+  return { products, tilesFound };
+}
+
+async function extractProductsFromAnchors(page) {
+  const { products, tilesFound } = await page.evaluate(() => {
+    const anchors = Array.from(
+      document.querySelectorAll("a[href*='/product/']:not([href*='ratings=reviews'])")
+    );
     const seen = new Set();
     const products = [];
 
     const normalizeUrl = (href) => {
-      if (!href || /ratings=reviews/i.test(href)) return null;
+      if (!href) return null;
       try {
-        const url = new URL(href, BASE);
+        const url = new URL(href, document.baseURI);
         url.search = "";
         url.hash = "";
         return `${url.origin}${url.pathname}`;
@@ -784,75 +898,39 @@ async function extractProducts(page) {
       }
     };
 
-    let debugSample = null;
-
-    for (const tile of tiles) {
-      const productLink = tile.querySelector(
-        "a[href*='/product/']:not([href*='ratings=reviews'])"
-      );
-      const href = productLink?.getAttribute("href") || null;
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute("href") || anchor.href || "";
       const productUrl = normalizeUrl(href);
-
-      const name =
-        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
-        tile.querySelector("span[data-bind*='displayName']")?.textContent?.trim() ||
-        productLink?.textContent?.trim() ||
-        null;
-
-      const imgEl = tile.querySelector("img.cclazyLoaded, img.img-responsive");
-      const imageUrl =
-        imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
-
-      const skuText = tile.querySelector(".cc-product-sku-container")?.textContent || "";
-      const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
-      const sku = skuMatch ? skuMatch[1] : null;
-
-      const priceRegularText =
-        tile.querySelector(".cc-product-before-price")?.textContent || null;
-      let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || null;
-      if (!priceSaleText) {
-        const singlePrice = tile.querySelector(".cc-product-price")?.textContent || null;
-        if (singlePrice) priceSaleText = singlePrice;
-      }
-
-      if (!debugSample) {
-        debugSample = {
-          sampleProductUrl: productUrl,
-          sampleName: name,
-          sampleSkuText: skuText || null,
-          sampleBeforePriceText: priceRegularText,
-          sampleAfterPriceText: priceSaleText,
-          sampleImgSrc: imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null,
-        };
-      }
-
       if (!productUrl || seen.has(productUrl)) continue;
 
+      const tile = anchor.closest("[data-testid='product-tile'], [data-testid='product-card'], article[data-product-id], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item");
+      const imgCandidate =
+        tile?.querySelector("img") ||
+        anchor.parentElement?.querySelector("img") ||
+        anchor.nextElementSibling?.querySelector?.("img") ||
+        anchor.previousElementSibling?.querySelector?.("img") ||
+        anchor.closest("div, li, article")?.querySelector?.("img");
+
+      const imageUrl =
+        imgCandidate?.getAttribute("src") || imgCandidate?.getAttribute("data-src") || null;
+
+      const name = anchor.textContent?.trim() || null;
+
       products.push({
+        productUrl,
         name,
         imageUrl,
-        productUrl,
-        sku,
-        priceRegular: priceRegularText,
-        priceSale: priceSaleText,
+        priceRegular: null,
+        priceSale: null,
+        sku: null,
       });
 
       seen.add(productUrl);
     }
 
-    return { products, tilesFound: tiles.length, debugSample };
+    return { products, tilesFound: anchors.length };
   });
 
-  console.log(`🧱 tilesFound=${tilesFound}`);
-  console.log(`Products extracted: ${products.length}`);
-  if (debugSample) {
-    console.log("[PA] sampleProductUrl", debugSample.sampleProductUrl);
-    console.log("[PA] sampleName", debugSample.sampleName);
-    console.log("[PA] sampleSkuText", debugSample.sampleSkuText);
-    console.log("[PA] sampleBeforePriceText", debugSample.sampleBeforePriceText);
-    console.log("[PA] sampleAfterPriceText", debugSample.sampleAfterPriceText);
-    console.log("[PA] sampleImgSrc", debugSample.sampleImgSrc);
-  }
   return { products, tilesFound };
 }
 
