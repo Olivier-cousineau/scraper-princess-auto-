@@ -661,11 +661,64 @@ function extractProductsFromNetwork(responses) {
   });
 }
 
+async function extractProductsFromConstructorDom(page) {
+  const base = "https://www.princessauto.com";
+
+  const list = page
+    .locator("#cio-results-list, .cio-search-result-list, .cio-search-result-list-container")
+    .first();
+  const scope = (await list.count()) ? list : page.locator("body");
+
+  const rows = await scope.locator("a.cio-search-result[href]").evaluateAll((els) => {
+    const out = [];
+    for (const a of els) {
+      const href = a.getAttribute("href") || "";
+      const name =
+        a.getAttribute("title") || a.getAttribute("aria-label") || a.textContent?.trim() || "";
+
+      const parent = a.parentElement;
+      const card = parent?.querySelector(".cc-product-card") || a.closest(".cc-product-card");
+
+      const sku = card?.getAttribute("data-oe-item-id") || "";
+      const dataName = card?.getAttribute("data-oe-item-name") || "";
+      const listPrice = card?.getAttribute("data-oe-item-list-price") || "";
+
+      out.push({
+        href,
+        name: dataName || name,
+        sku,
+        listPrice,
+      });
+    }
+    return out;
+  });
+
+  const seen = new Set();
+  const normalized = [];
+  for (const r of rows) {
+    if (!r.href) continue;
+    const abs = r.href.startsWith("http") ? r.href : base + r.href;
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    normalized.push({ ...r, href: abs });
+    if (normalized.length >= 50) break;
+  }
+  return normalized;
+}
+
 async function extractProductsWithFallbacks(page, jsonResponses = []) {
   await preparePageForExtraction(page);
-  let products = await extractProducts(page);
+  console.log(
+    `[PA] constructorDomCount=${await page.locator(".cio-search-result-list a.cio-search-result").count()}`
+  );
+  let products = await extractProductsFromConstructorDom(page);
   let usedDomFallback = false;
   let usedNetworkFallback = false;
+
+  if (!products.length) {
+    console.warn("[PA] Constructor.io extraction returned 0. Trying primary DOM extractor...");
+    products = await extractProducts(page);
+  }
 
   if (!products.length) {
     console.warn("[PA] Primary extraction returned 0. Trying DOM fallback...");
