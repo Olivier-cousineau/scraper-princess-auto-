@@ -282,45 +282,11 @@ function extractPostalFromAddress(address = "") {
   return postalMatch ? postalMatch[0].toUpperCase().replace(/\s+/, " ") : null;
 }
 
-function getCityOrPostal(store) {
-  const postal =
-    store.postalCode || store.postal || store.zip || extractPostalFromAddress(store.address || "");
-
-  return (
-    postal ||
-    store.city ||
-    store.name ||
-    store.title ||
-    store.displayName ||
-    store.storeName ||
-    store.slug ||
-    ""
-  );
-}
-
-function getCityLabelForButton(store) {
-  const label =
-    store.city || store.name || store.title || store.displayName || store.storeName || store.slug || "";
-  return label.toUpperCase();
-}
-
-async function submitStoreSearch(page) {
-  const submit = page.locator("button[data-testid='cio-submit-btn']").first();
-
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(500);
-
-  if (await submit.count()) {
-    try {
-      const handle = await submit.elementHandle();
-      if (handle) {
-        await page.waitForFunction((el) => el && !el.disabled, handle, { timeout: 8000 });
-        await submit.click();
-        await page.waitForTimeout(800);
-        return;
-      }
-    } catch {}
-  }
+function normalizePostal(p) {
+  if (!p) return "";
+  const s = String(p).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (s.length === 6) return s.slice(0, 3) + " " + s.slice(3);
+  return p.toUpperCase().trim();
 }
 
 async function ensureOnSalePage(page) {
@@ -354,129 +320,47 @@ async function ensureOnSalePage(page) {
 }
 
 async function setStoreThenGoToSale(page, store, debugPaths = []) {
-  const cityOrPostal = getCityOrPostal(store);
-  const cityLabelForButton = getCityLabelForButton(store);
+  const postal = normalizePostal(store.postalCode || store.postal || store.zip);
+  const city = store.city || "";
 
-  console.log(`Setting store using UI flow => ${cityOrPostal}`);
+  console.log(`Setting store using Locations page => postal=${postal} city=${city}`);
 
-  await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-
-  const triggerCandidates = [
-    page.getByRole("button", { name: /my store|magasin|store locator/i }).first(),
-    page.getByRole("link", { name: /my store|magasin|store locator/i }).first(),
-    page.locator("text=/My Store|Magasin|Store Locator/i").first(),
-  ];
-
-  let trigger = null;
-  for (const candidate of triggerCandidates) {
-    if (await candidate.isVisible({ timeout: 3000 }).catch(() => false)) {
-      trigger = candidate;
-      break;
-    }
-  }
-
-  if (!trigger) {
-    throw new Error("Could not find store locator trigger");
-  }
-
-  await trigger.click({ timeout: 10000 });
-
-  const modal = page.locator("[role='dialog'], .store-selector, .select-store");
-  await modal.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
-
-  const searchInputCandidates = [
-    page.getByRole("textbox", { name: /postal|city|search/i }).first(),
-    page.locator("input[type='search'], input[placeholder*='postal' i], input[placeholder*='city' i]").first(),
-  ];
-
-  let searchInput = null;
-  for (const input of searchInputCandidates) {
-    if (await input.isVisible({ timeout: 3000 }).catch(() => false)) {
-      searchInput = input;
-      break;
-    }
-  }
-
-  if (!searchInput) {
-    throw new Error("Could not find store search input");
-  }
+  await page.goto(
+    `https://www.princessauto.com/en/locations?origin=header&initialPostalCode=${encodeURIComponent(postal)}`,
+    { waitUntil: "domcontentloaded" }
+  );
 
   await dismissMakeStoreModal(page);
-  await page.waitForTimeout(200);
-  await searchInput.click({ timeout: 10000 });
-  await searchInput.press("Control+A").catch(() => {});
-  await searchInput.type(cityOrPostal, { delay: 35 });
-  await searchInput.press("Tab").catch(() => {});
-  await page.waitForTimeout(400);
 
-  debugPaths.push(...(await captureDebug(page, store.slug, "after_store_search_type")));
-
-  await submitStoreSearch(page);
-
-  const makeMyStoreButtons = page.getByRole("button", { name: /faire\s+de\s+.*\s+mon\s+magasin/i });
-
-  let makeMyStoreReady = await makeMyStoreButtons
-    .first()
-    .waitFor({ state: "visible", timeout: 15000 })
-    .then(() => true)
-    .catch(() => false);
-
-  if (!makeMyStoreReady) {
-    console.warn("⚠️ Make My Store button not visible after first attempt; retrying search");
-    await dismissMakeStoreModal(page);
-    await page.waitForTimeout(200);
-    await searchInput.click({ timeout: 10000 });
-    await searchInput.press("Control+A").catch(() => {});
-    await searchInput.type(cityOrPostal, { delay: 35 }).catch(() => {});
-    await searchInput.press("Tab").catch(() => {});
-    await page.waitForTimeout(400);
-    await submitStoreSearch(page);
-    makeMyStoreReady = await makeMyStoreButtons
-      .first()
-      .waitFor({ state: "visible", timeout: 15000 })
-      .then(() => true)
-      .catch(() => false);
+  const input = page.locator("#addressInput").first();
+  if (await input.count()) {
+    await input.click();
+    await input.press("Control+A").catch(() => {});
+    await input.type(postal, { delay: 35 });
+    await input.press("Enter").catch(() => {});
+    await input.press("Tab").catch(() => {});
   }
+  await page.waitForTimeout(1200);
 
-  if (!makeMyStoreReady) {
-    const submitButton = page.locator("button[data-testid='cio-submit-btn']").first();
-    const addressInput = page.locator("#addressInput");
-    const makeMyStoreCount = await makeMyStoreButtons.count();
-    const inputValue = await addressInput.inputValue().catch(() => "<unavailable>");
-    const submitDisabled = (await submitButton.evaluate((el) => el?.disabled).catch(() => null)) ??
-      "not-found";
-    const extraNotes = [
-      `addressInput.value=${inputValue}`,
-      `submit.disabled=${submitDisabled}`,
-      `url=${page.url()}`,
-      `makeMyStoreButtons.count=${makeMyStoreCount}`,
-    ];
-    console.warn(
-      `⚠️ Make My Store button not resolved for ${cityLabelForButton}; submit disabled state: ${submitDisabled}`
-    );
-    debugPaths.push(...(await captureDebug(page, store.slug, "after_store_submit_attempt")));
-    debugPaths.push(...(await captureDebug(page, store.slug, "store_search_not_resolved", { extraNotes })));
-    throw new Error(`Make My Store button not available for ${cityLabelForButton}`);
-  }
+  const storeCard = page.locator(
+    '[data-testid*="store"], .store, .store-card, .location, .location-card, a[href*="/locations/"]'
+  );
 
-  let makeMyStoreTarget = makeMyStoreButtons.first();
-  const preferredButton = page.getByRole("button", {
-    name: new RegExp(
-      `faire\\s+de\\s+${escapeRegex(store.city || cityLabelForButton || "")}\\s+mon\\s+magasin`,
-      "i"
-    ),
-  });
-  if (await preferredButton.count()) {
-    makeMyStoreTarget = preferredButton.first();
-  }
+  await storeCard.first().waitFor({ state: "visible", timeout: 20000 });
 
-  await makeMyStoreTarget.click({ timeout: 20000 });
-  debugPaths.push(...(await captureDebug(page, store.slug, "after_make_my_store")));
+  let targetCard = storeCard.filter({ hasText: new RegExp(city, "i") }).first();
 
+  if (!(await targetCard.count())) targetCard = storeCard.first();
+
+  const makeBtn = targetCard
+    .getByRole("button", {
+      name: /faire\s+de\s+.*\s+mon\s+magasin|make\s+.*\s+my\s+store/i,
+    })
+    .first();
+
+  await makeBtn.waitFor({ state: "visible", timeout: 15000 });
+  await makeBtn.click();
   await dismissMakeStoreModal(page);
-  await page.waitForTimeout(200);
-  debugPaths.push(...(await captureDebug(page, store.slug, "after_ok")));
 
   const saleLink = page.getByRole("link", { name: /vente|sale/i }).first();
   if (await saleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -484,7 +368,9 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
   } else {
     await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
   }
-  debugPaths.push(...(await captureDebug(page, store.slug, "after_sale_click")));
+  if (page.url().includes("/locations")) {
+    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+  }
 
   await ensureOnSalePage(page);
 }
