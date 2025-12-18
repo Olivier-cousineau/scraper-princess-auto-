@@ -6,6 +6,7 @@ import { chromium } from "playwright";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
+const BASE_URL = "https://www.princessauto.com";
 
 const SALE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
@@ -292,7 +293,7 @@ async function clickNextAndWaitForChange(page, previousHref, previousCount) {
     .first();
 
   if (!(await nextBtn.count())) {
-    return false;
+    return { clicked: false, changed: false };
   }
 
   console.log("🔘 Clicking Next pagination control");
@@ -307,7 +308,7 @@ async function clickNextAndWaitForChange(page, previousHref, previousCount) {
 
   await page.waitForLoadState("networkidle").catch(() => {});
 
-  return contentChanged !== false;
+  return { clicked: true, changed: contentChanged !== false };
 }
 
 async function navigateToSale(page) {
@@ -461,7 +462,12 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
-      let productsOnPage = await extractProductsWithFallbacks(page, jsonResponses);
+      const extractionMeta = await extractProductsWithFallbacks(
+        page,
+        jsonResponses
+      );
+      let usedDomFallback = extractionMeta.usedDomFallback;
+      let productsOnPage = normalizeProducts(extractionMeta.products);
       let productCount = productsOnPage.length;
 
       if (
@@ -476,14 +482,21 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         await ensureOnSalePage(page);
         await page.waitForLoadState("networkidle").catch(() => {});
         await waitForProductsGrid(page);
-        productsOnPage = await extractProductsWithFallbacks(page, jsonResponses);
+        const retryExtraction = await extractProductsWithFallbacks(
+          page,
+          jsonResponses
+        );
+        usedDomFallback = usedDomFallback || retryExtraction.usedDomFallback;
+        productsOnPage = normalizeProducts(retryExtraction.products);
         productCount = productsOnPage.length;
       }
 
       const currentUrlNoHash = page.url().split("#")[0];
-      const firstProductHref = productsOnPage[0]?.url || (await getFirstGridHref(page));
+      const first = productsOnPage[0];
+      const firstProductHref =
+        first?.href || first?.url || first?.link || (await getFirstGridHref(page));
       const currentPageUrls = productsOnPage
-        .map((product) => product.url || product.id || product.title || "")
+        .map((product) => product.href || product.url || product.id || product.title || "")
         .filter(Boolean);
       const signatureParts = [
         currentPageUrls.slice(0, 10).join("|"),
@@ -501,14 +514,14 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
       }
       prevSignature = pageSignature;
 
-      let newUniqueCount = 0;
-      for (const product of productsOnPage) {
-        if (product.url && !seen.has(product.url)) {
-          seen.add(product.url);
-          allProducts.push(product);
-          newUniqueCount += 1;
-        }
-      }
+      const uniqueProducts = productsOnPage.filter((product) => {
+        if (!product.href || seen.has(product.href)) return false;
+        seen.add(product.href);
+        return true;
+      });
+
+      allProducts.push(...uniqueProducts);
+      const newUniqueCount = uniqueProducts.length;
 
       if (newUniqueCount === 0) {
         zeroGainStreak += 1;
@@ -536,13 +549,21 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         break;
       }
 
-      const gridChanged = await clickNextAndWaitForChange(
-        page,
-        firstProductHref,
-        productCount || (await getProductTileCount(page))
-      );
+      const { clicked: nextClicked, changed: gridChanged } =
+        await clickNextAndWaitForChange(
+          page,
+          firstProductHref,
+          productCount || (await getProductTileCount(page))
+        );
 
-      if (!gridChanged) {
+      if (!nextClicked) {
+        console.log(
+          `🛑 Stop pagination: Next control unavailable or grid unchanged on page ${pageNum}`
+        );
+        break;
+      }
+
+      if (!gridChanged && !usedDomFallback) {
         console.log(
           `🛑 Stop pagination: Next control unavailable or grid unchanged on page ${pageNum}`
         );
@@ -562,18 +583,37 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
 }
 
 async function extractProductsDomFallback(page) {
-  const hrefs = await page.$$eval(
-    "a[href]",
-    (as) => as.map((a) => a.getAttribute("href")).filter(Boolean)
-  );
+  const base = BASE_URL;
 
-  const productHrefs = [...new Set(hrefs)]
-    .filter((h) => /\/product\/|\/produit\/|\/p\//i.test(h))
-    .slice(0, 400);
+  const items = await page.$$eval("a[href]", (as) => {
+    const out = [];
+    for (const a of as) {
+      const href = a.getAttribute("href") || "";
+      if (!/\/product\/|\/p\/|\/produit\/|\/en\/p\/|\/fr\/p\//i.test(href)) continue;
 
-  return productHrefs.map((h) => ({
-    href: h.startsWith("http") ? h : `https://www.princessauto.com${h}`,
-  }));
+      const name =
+        a.getAttribute("aria-label") ||
+        a.textContent?.trim() ||
+        a.closest("[data-testid*='product'], .product, .product-tile, .productTile")?.textContent?.trim() ||
+        "";
+
+      out.push({ href, name });
+    }
+    return out;
+  });
+
+  const seen = new Set();
+  const normalized = [];
+  for (const it of items) {
+    if (!it.href) continue;
+    const abs = it.href.startsWith("http") ? it.href : base + it.href;
+    const key = abs;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ ...it, href: abs });
+  }
+
+  return normalized.slice(0, 500);
 }
 
 function extractProductsFromNetwork(responses) {
@@ -611,18 +651,24 @@ function extractProductsFromNetwork(responses) {
 async function extractProductsWithFallbacks(page, jsonResponses = []) {
   await preparePageForExtraction(page);
   let products = await extractProducts(page);
+  let usedDomFallback = false;
+  let usedNetworkFallback = false;
 
   if (!products.length) {
     console.warn("[PA] Primary extraction returned 0. Trying DOM fallback...");
     products = await extractProductsDomFallback(page);
+    usedDomFallback = true;
   }
 
-  if (!products.length) {
+  const hasHref = products.some((p) => normalizeHref(p?.href || p?.url || p?.link));
+
+  if (!products.length || !hasHref) {
     console.warn("[PA] DOM still 0. Trying network JSON fallback...");
     products = extractProductsFromNetwork(jsonResponses);
+    usedNetworkFallback = true;
   }
 
-  return products;
+  return { products, usedDomFallback, usedNetworkFallback };
 }
 
 async function extractProducts(page) {
@@ -723,7 +769,50 @@ async function extractProducts(page) {
   console.log(`🧱 Product tiles detected before extraction: ${tileCount}`);
   console.log(`🫧 Visible products in viewport: ${visibleProducts}`);
   console.log(`Products extracted: ${products.length}`);
-  return products;
+  return products.map((p) => ({
+    ...p,
+    href: normalizeHref(p.url),
+    url: normalizeHref(p.url),
+    name: p.title || "",
+  }));
+}
+
+function normalizeHref(href) {
+  if (!href) return null;
+  try {
+    return new URL(href, BASE_URL).href.split("#")[0];
+  } catch (error) {
+    return null;
+  }
+}
+
+function normalizeProduct(product = {}) {
+  const href = normalizeHref(product.href || product.url || product.link);
+  const name = product.name || product.title || "";
+  const title = product.title || product.name || null;
+
+  return {
+    ...product,
+    href,
+    url: href || product.url || null,
+    name,
+    title,
+  };
+}
+
+function normalizeProducts(products = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const product of products) {
+    const normalized = normalizeProduct(product);
+    if (!normalized.href) continue;
+    if (seen.has(normalized.href)) continue;
+    seen.add(normalized.href);
+    out.push(normalized);
+  }
+
+  return out;
 }
 
 function writeStoreOutput(store, products, storeSynced = true) {
