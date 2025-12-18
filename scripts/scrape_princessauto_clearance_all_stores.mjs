@@ -900,7 +900,9 @@ async function extractProducts(page, pageNum = 1) {
       let debugSample = null;
 
       for (const tile of tiles) {
-        const productLink = tile.querySelector("a[id^='CC-product-title-']");
+        const productLink = tile.querySelector(
+          "a[href*='/product/']:not([href*='ratings=reviews'])"
+        );
         const href = productLink?.getAttribute("href") || productLink?.href || null;
         const productUrl = normalizeUrl(href);
 
@@ -913,7 +915,7 @@ async function extractProducts(page, pageNum = 1) {
         const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
         const skuText = tile.querySelector("div.cc-product-sku-container")?.textContent || "";
-        const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
+        const skuMatch = skuText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
         const sku = skuMatch ? skuMatch[1] : null;
 
         const priceRegularText =
@@ -925,7 +927,7 @@ async function extractProducts(page, pageNum = 1) {
           const inner = tile.innerHTML || "";
           debugSample = {
             sampleTileInnerHTML: inner.slice(0, 500),
-            sampleFoundHref: href,
+            sampleFoundHref: productUrl || href,
             sampleFoundName: name,
             sampleFoundImg: imageUrl,
             sampleFoundSkuText: skuText || null,
@@ -969,7 +971,9 @@ async function extractProducts(page, pageNum = 1) {
 
 async function extractProductsFromAnchors(page) {
   const { products, tilesFound } = await page.evaluate(() => {
-    const tiles = Array.from(document.querySelectorAll("div.cc-product-card"));
+    const anchors = Array.from(
+      document.querySelectorAll("a[href*='/product/']:not([href*='ratings=reviews'])")
+    );
     const seen = new Set();
     const products = [];
 
@@ -985,30 +989,28 @@ async function extractProductsFromAnchors(page) {
       }
     };
 
-    for (const tile of tiles) {
-      const productLink = tile.querySelector("a[id^='CC-product-title-']");
-      const href = productLink?.getAttribute("href") || productLink?.href || null;
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute("href") || anchor.href || null;
       const productUrl = normalizeUrl(href);
       if (!productUrl || seen.has(productUrl)) continue;
 
+      const card = anchor.closest("div.cc-product-card");
       const name =
-        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
-        productLink?.textContent?.trim() ||
+        card?.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+        anchor.textContent?.trim() ||
         null;
 
-      const imgEl = tile.querySelector("img.img-responsive");
+      const imgEl = card?.querySelector("img.img-responsive") || null;
       const imageUrl = imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
       const priceRegularText =
-        tile.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
+        card?.querySelector("span.cc-product-before-price")?.textContent?.trim() || null;
       const priceSaleText =
-        tile.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
+        card?.querySelector("span.cc-product-after-price")?.textContent?.trim() || null;
 
-      const skuText = tile.querySelector("div.cc-product-sku-container")?.textContent || "";
-      const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
+      const skuText = card?.querySelector("div.cc-product-sku-container")?.textContent || "";
+      const skuMatch = skuText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
       const sku = skuMatch ? skuMatch[1] : null;
-
-      if (!sku) continue;
 
       products.push({
         productUrl,
@@ -1022,7 +1024,7 @@ async function extractProductsFromAnchors(page) {
       seen.add(productUrl);
     }
 
-    return { products, tilesFound: tiles.length };
+    return { products, tilesFound: anchors.length };
   });
 
   return { products, tilesFound };
