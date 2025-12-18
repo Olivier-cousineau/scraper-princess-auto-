@@ -337,6 +337,19 @@ function normalizePostal(p) {
   return p.toUpperCase().trim();
 }
 
+function normalizePrice(value) {
+  if (value === null || value === undefined) return null;
+  const str = String(value).replace(/[^0-9.,-]/g, "").trim();
+  if (!str) return null;
+
+  const hasCommaDecimal = str.includes(",") && !str.includes(".");
+  let normalized = hasCommaDecimal ? str.replace(",", ".") : str;
+  normalized = normalized.replace(/,/g, "").replace(/\s+/g, "");
+
+  const num = parseFloat(normalized);
+  return Number.isFinite(num) ? num : null;
+}
+
 async function ensureOnSalePage(page) {
   let recovered = false;
   if (page.url().includes("/locations")) {
@@ -477,6 +490,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
   let zeroGainStreak = 0;
   let recoveredFromLocations = false;
   let firstPageZeroRetry = false;
+  let totalAnchors = 0;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
@@ -497,6 +511,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         page,
         jsonResponses
       );
+      totalAnchors += extractionMeta.anchorsTotal || 0;
       let usedDomFallback = extractionMeta.usedDomFallback;
       let productsOnPage = normalizeProducts(extractionMeta.products);
       let productCount = productsOnPage.length;
@@ -518,6 +533,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
           jsonResponses
         );
         usedDomFallback = usedDomFallback || retryExtraction.usedDomFallback;
+        totalAnchors += retryExtraction.anchorsTotal || 0;
         productsOnPage = normalizeProducts(retryExtraction.products);
         productCount = productsOnPage.length;
       }
@@ -525,9 +541,21 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
       const currentUrlNoHash = page.url().split("#")[0];
       const first = productsOnPage[0];
       const firstProductHref =
-        first?.href || first?.url || first?.link || (await getFirstGridHref(page));
+        first?.productUrl ||
+        first?.href ||
+        first?.url ||
+        first?.link ||
+        (await getFirstGridHref(page));
       const currentPageUrls = productsOnPage
-        .map((product) => product.href || product.url || product.id || product.title || "")
+        .map((product) =>
+          product.productUrl ||
+            product.href ||
+            product.url ||
+            product.id ||
+            product.title ||
+            product.name ||
+            ""
+        )
         .filter(Boolean);
       const signatureParts = [
         currentPageUrls.slice(0, 10).join("|"),
@@ -546,8 +574,9 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
       prevSignature = pageSignature;
 
       const uniqueProducts = productsOnPage.filter((product) => {
-        if (!product.href || seen.has(product.href)) return false;
-        seen.add(product.href);
+        const key = product.productUrl || product.href || product.url;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
         return true;
       });
 
@@ -597,7 +626,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
   }
 
   console.log(`[PA] ${store.slug} total products across pages=${allProducts.length}`);
-  return allProducts;
+  return { products: allProducts, anchorsTotal: totalAnchors };
 }
 
 async function extractProductsDomFallback(page) {
@@ -644,7 +673,7 @@ async function extractProductsDomFallback(page) {
       .join(" | ")}`
   );
 
-  return normalized;
+  return { products: normalized, anchorsTotal: normalized.length };
 }
 
 function extractProductsFromNetwork(responses) {
@@ -721,7 +750,7 @@ async function extractProductsFromConstructorDom(page) {
     normalized.push({ ...r, href: abs });
     if (normalized.length >= 50) break;
   }
-  return normalized;
+  return { products: normalized, anchorsTotal: normalized.length };
 }
 
 async function extractProductsWithFallbacks(page, jsonResponses = []) {
@@ -729,35 +758,42 @@ async function extractProductsWithFallbacks(page, jsonResponses = []) {
   console.log(
     `[PA] constructorDomCount=${await page.locator(".cio-search-result-list a.cio-search-result").count()}`
   );
-  let products = await extractProductsFromConstructorDom(page);
+  let { products, anchorsTotal = 0 } = await extractProductsFromConstructorDom(page);
   let usedDomFallback = false;
   let usedNetworkFallback = false;
 
   if (!products.length) {
     console.warn("[PA] Constructor.io extraction returned 0. Trying primary DOM extractor...");
-    products = await extractProducts(page);
+    const primary = await extractProducts(page);
+    products = primary.products;
+    anchorsTotal = primary.anchorsTotal;
   }
 
   if (!products.length) {
     console.warn("[PA] Primary extraction returned 0. Trying DOM fallback...");
-    products = await extractProductsDomFallback(page);
+    const fallback = await extractProductsDomFallback(page);
+    products = fallback.products;
+    anchorsTotal = fallback.anchorsTotal;
     usedDomFallback = true;
   }
 
-  const hasHref = products.some((p) => normalizeHref(p?.href || p?.url || p?.link));
+  const hasHref = products.some((p) =>
+    normalizeHref(p?.productUrl || p?.href || p?.url || p?.link)
+  );
 
   if (!products.length || !hasHref) {
     console.warn("[PA] DOM still 0. Trying network JSON fallback...");
     products = extractProductsFromNetwork(jsonResponses);
+    anchorsTotal = anchorsTotal || products.length;
     usedNetworkFallback = true;
   }
 
-  return { products, usedDomFallback, usedNetworkFallback };
+  return { products, usedDomFallback, usedNetworkFallback, anchorsTotal };
 }
 
 async function extractProducts(page) {
   console.log("🔍 Extracting products...");
-  const { products, tileCount, visibleProducts } = await page.evaluate(
+  const { products, tileCount, visibleProducts, anchorsTotal } = await page.evaluate(
     ({ productSelector, selectors }) => {
       const tiles = Array.from(document.querySelectorAll(productSelector)).filter((tile) =>
         selectors.some((selector) => tile.querySelector(selector))
@@ -766,20 +802,61 @@ async function extractProducts(page) {
       const visibleKeys = new Set();
       const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+      let anchorsTotal = 0;
+
+      const normalizeUrl = (href) => {
+        if (!href) return null;
+        try {
+          const url = new URL(href, document.baseURI);
+          if (url.searchParams.get("ratings") === "reviews") {
+            url.searchParams.delete("ratings");
+          }
+          const cleanedSearch = url.searchParams.toString();
+          const base = `${url.origin}${url.pathname}`;
+          return `${base}${cleanedSearch ? `?${cleanedSearch}` : ""}`.split("#")[0];
+        } catch (error) {
+          return null;
+        }
+      };
+
+      const normalizePriceText = (value) => {
+        if (value === null || value === undefined) return null;
+        const str = String(value).replace(/[^0-9.,-]/g, "").trim();
+        if (!str) return null;
+
+        const hasCommaDecimal = str.includes(",") && !str.includes(".");
+        let normalized = hasCommaDecimal ? str.replace(",", ".") : str;
+        normalized = normalized.replace(/,/g, "").replace(/\s+/g, "");
+
+        const num = parseFloat(normalized);
+        return Number.isFinite(num) ? num : null;
+      };
+
+      const extractSku = (tile) => {
+        const attrSku = Array.from(tile.attributes)
+          .map((attr) => ({ name: attr.name.toLowerCase(), value: attr.value?.trim() || "" }))
+          .find(({ name }) => name.includes("sku") || name.includes("productid") || name.includes("product-id"));
+        if (attrSku?.value) return attrSku.value;
+
+        const dataSku = tile.getAttribute("data-sku") || tile.getAttribute("data-productid") || tile.getAttribute("data-product-id");
+        if (dataSku) return dataSku.trim();
+
+        const text = (tile.textContent || "").replace(/ratings=reviews/gi, "");
+        const directMatch = text.match(/(?:SKU|UGS|Item|Model)\s*[:#]?\s*([A-Z0-9-]+)/i);
+        if (directMatch?.[1]) return directMatch[1].trim();
+
+        return "";
+      };
 
       for (const tile of tiles) {
         const anchor = selectors
           .map((selector) => tile.querySelector(selector))
           .find((el) => el?.getAttribute("href") || el?.href);
         if (!anchor) continue;
+        anchorsTotal += 1;
         const href = anchor.getAttribute("href") || anchor.href;
         if (!href) continue;
-        let url = null;
-        try {
-          url = new URL(href, document.baseURI).href.split("#")[0];
-        } catch (error) {
-          continue;
-        }
+        const url = normalizeUrl(href);
 
         if (!url || deduped.has(url)) continue;
 
@@ -817,6 +894,8 @@ async function extractProducts(page) {
           getText("[class*='was']") ||
           null;
 
+        const sku = extractSku(tile);
+
         if (!title || !url) continue;
 
         const rect = tile.getBoundingClientRect();
@@ -833,11 +912,12 @@ async function extractProducts(page) {
         }
 
         deduped.set(url, {
-          title,
-          url,
-          image: imageUrl,
-          priceRegular: originalPriceText || null,
-          priceSale: currentPriceText || null,
+          name: title,
+          productUrl: url,
+          imageUrl,
+          priceRegular: normalizePriceText(originalPriceText),
+          priceSale: normalizePriceText(currentPriceText),
+          sku,
         });
       }
 
@@ -845,6 +925,7 @@ async function extractProducts(page) {
         tileCount: tiles.length,
         products: Array.from(deduped.values()),
         visibleProducts: visibleKeys.size,
+        anchorsTotal,
       };
     },
     { productSelector: PRODUCT_TILE_SELECTOR, selectors: PRODUCT_LINK_SELECTORS }
@@ -853,34 +934,43 @@ async function extractProducts(page) {
   console.log(`🧱 Product tiles detected before extraction: ${tileCount}`);
   console.log(`🫧 Visible products in viewport: ${visibleProducts}`);
   console.log(`Products extracted: ${products.length}`);
-  return products.map((p) => ({
-    ...p,
-    href: normalizeHref(p.url),
-    url: normalizeHref(p.url),
-    name: p.title || "",
-  }));
+  return { products, anchorsTotal };
 }
 
 function normalizeHref(href) {
   if (!href) return null;
   try {
-    return new URL(href, BASE_URL).href.split("#")[0];
+    const url = new URL(href, BASE_URL);
+    if (url.searchParams.get("ratings") === "reviews") {
+      url.searchParams.delete("ratings");
+    }
+    const cleanedSearch = url.searchParams.toString();
+    const base = `${url.origin}${url.pathname}`;
+    return `${base}${cleanedSearch ? `?${cleanedSearch}` : ""}`.split("#")[0];
   } catch (error) {
     return null;
   }
 }
 
 function normalizeProduct(product = {}) {
-  const href = normalizeHref(product.href || product.url || product.link);
-  const name = product.name || product.title || "";
-  const title = product.title || product.name || null;
+  const productUrl = normalizeHref(
+    product.productUrl || product.href || product.url || product.link
+  );
+  const name = (product.name || product.title || "").trim();
+  const imageUrl = product.imageUrl || product.image || null;
+  const priceRegular = normalizePrice(product.priceRegular ?? product.price);
+  const priceSale = normalizePrice(product.priceSale ?? product.price);
+  const sku = product.sku ?? "";
+
+  if (!productUrl) return null;
 
   return {
-    ...product,
-    href,
-    url: href || product.url || null,
     name,
-    title,
+    imageUrl,
+    productUrl,
+    sku,
+    priceRegular,
+    priceSale,
   };
 }
 
@@ -890,24 +980,34 @@ function normalizeProducts(products = []) {
 
   for (const product of products) {
     const normalized = normalizeProduct(product);
-    if (!normalized.href) continue;
-    if (seen.has(normalized.href)) continue;
-    seen.add(normalized.href);
+    if (!normalized?.productUrl) continue;
+    if (seen.has(normalized.productUrl)) continue;
+    seen.add(normalized.productUrl);
     out.push(normalized);
   }
 
   return out;
 }
 
-function writeStoreOutput(store, products, storeSynced = true) {
+function writeStoreOutput(store, products, storeSynced = true, anchorsTotal = 0) {
   const slug = store.slug;
   const storeDir = path.join(OUTPUT_ROOT, slug);
   const outputFile = path.join(storeDir, "data.json");
   const csvFile = path.join(storeDir, "data.csv");
+  const scrapedAt = new Date().toISOString();
 
   fs.mkdirSync(storeDir, { recursive: true });
 
-  const csvHeaders = ["title", "image", "url", "priceRegular", "priceSale", "storeSlug", "storeName"];
+  const csvHeaders = [
+    "storeSlug",
+    "scrapedAt",
+    "name",
+    "imageUrl",
+    "productUrl",
+    "sku",
+    "priceRegular",
+    "priceSale",
+  ];
   const csvRows = [csvHeaders.join(",")];
 
   const escapeCsv = (value) => {
@@ -919,16 +1019,31 @@ function writeStoreOutput(store, products, storeSynced = true) {
     return str;
   };
 
-  for (const product of products) {
-    const row = csvHeaders
-      .map((key) => escapeCsv(Object.prototype.hasOwnProperty.call(product, key) ? product[key] : ""))
-      .join(",");
+  const productsWithMeta = products.map((product) => ({
+    ...product,
+    storeSlug: slug,
+    scrapedAt,
+  }));
+
+  for (const product of productsWithMeta) {
+    const row = csvHeaders.map((key) => escapeCsv(product[key])).join(",");
     csvRows.push(row);
   }
 
   fs.writeFileSync(csvFile, csvRows.join("\n"), "utf8");
 
-  const payload = {
+  fs.writeFileSync(outputFile, JSON.stringify(productsWithMeta, null, 2), "utf8");
+
+  const withSkuCount = productsWithMeta.filter((p) => p.sku).length;
+  const missingSkuCount = productsWithMeta.length - withSkuCount;
+
+  console.log(
+    `📊 anchorsTotal=${anchorsTotal} uniqueProducts=${productsWithMeta.length} withSkuCount=${withSkuCount} missingSkuCount=${missingSkuCount}`
+  );
+  console.log(`💾 JSON written → ${outputFile}`);
+  console.log(`💾 CSV written → ${csvFile}`);
+
+  return {
     storeName: store.name || store.storeName,
     city: store.city,
     province: store.province,
@@ -937,15 +1052,10 @@ function writeStoreOutput(store, products, storeSynced = true) {
     postalCode: store.postalCode ?? null,
     phone: store.phone ?? null,
     slug: store.slug,
-    updatedAt: new Date().toISOString(),
+    updatedAt: scrapedAt,
     storeSynced,
-    products,
+    products: productsWithMeta,
   };
-
-  fs.writeFileSync(outputFile, JSON.stringify(payload, null, 2), "utf8");
-
-  console.log(`💾 Wrote ${products.length} product(s) for ${store.slug} → ${outputFile}`);
-  return payload;
 }
 
 async function captureDebug(page, slug, stage, options = {}) {
@@ -1028,7 +1138,7 @@ async function processStore(page, store) {
     const jsonResponses = await setStoreThenGoToSale(page, store, debugPaths);
     await ensureOnSalePage(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    const allProducts = await loadProductsByPagination(
+    const { products: allProducts, anchorsTotal } = await loadProductsByPagination(
       page,
       store,
       jsonResponses,
@@ -1048,12 +1158,6 @@ async function processStore(page, store) {
       console.log(`ℹ️ Results summary: ${(resultsText || "").trim()}`);
     }
 
-    const allProductsWithStore = allProducts.map((product) => ({
-      ...product,
-      storeSlug: store.slug,
-      storeName: store.name || store.storeName || null,
-    }));
-
     const hasNoResultsText = await page
       .locator("text=/No results/i, text=/0 results/i, text=/No items/i")
       .first()
@@ -1062,11 +1166,11 @@ async function processStore(page, store) {
 
     const isZeroLegit = hasNoResultsText || totalResultCount === 0;
 
-    const shouldKeepDebug = allProductsWithStore.length === 0 || !storeSynced;
+    const shouldKeepDebug = allProducts.length === 0 || !storeSynced;
 
     if (shouldKeepDebug) {
       const reason =
-        allProductsWithStore.length === 0
+        allProducts.length === 0
           ? isZeroLegit
             ? "Page reports zero results"
             : "Page indicates results but extraction returned 0"
@@ -1079,7 +1183,7 @@ async function processStore(page, store) {
       deleteDebugArtifacts(debugPaths);
     }
 
-    return writeStoreOutput(store, allProductsWithStore, storeSynced);
+    return writeStoreOutput(store, allProducts, storeSynced, anchorsTotal);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
     debugPaths.push(...(await captureDebug(page, store.slug, "store_failed")));
