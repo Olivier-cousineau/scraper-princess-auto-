@@ -490,7 +490,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
   let zeroGainStreak = 0;
   let recoveredFromLocations = false;
   let firstPageZeroRetry = false;
-  let totalAnchors = 0;
+  let totalTilesFound = 0;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
@@ -511,8 +511,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         page,
         jsonResponses
       );
-      totalAnchors += extractionMeta.anchorsTotal || 0;
-      let usedDomFallback = extractionMeta.usedDomFallback;
+      totalTilesFound += extractionMeta.tilesFound || 0;
       let productsOnPage = normalizeProducts(extractionMeta.products);
       let productCount = productsOnPage.length;
 
@@ -532,8 +531,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
           page,
           jsonResponses
         );
-        usedDomFallback = usedDomFallback || retryExtraction.usedDomFallback;
-        totalAnchors += retryExtraction.anchorsTotal || 0;
+        totalTilesFound += retryExtraction.tilesFound || 0;
         productsOnPage = normalizeProducts(retryExtraction.products);
         productCount = productsOnPage.length;
       }
@@ -626,7 +624,7 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
   }
 
   console.log(`[PA] ${store.slug} total products across pages=${allProducts.length}`);
-  return { products: allProducts, anchorsTotal: totalAnchors };
+  return { products: allProducts, tilesFound: totalTilesFound };
 }
 
 async function extractProductsDomFallback(page) {
@@ -755,198 +753,90 @@ async function extractProductsFromConstructorDom(page) {
 
 async function extractProductsWithFallbacks(page, jsonResponses = []) {
   await preparePageForExtraction(page);
-  console.log(
-    `[PA] constructorDomCount=${await page.locator(".cio-search-result-list a.cio-search-result").count()}`
-  );
-  let { products, anchorsTotal = 0 } = await extractProductsFromConstructorDom(page);
-  let usedDomFallback = false;
-  let usedNetworkFallback = false;
+  const { products, tilesFound } = await extractProducts(page);
 
-  if (!products.length) {
-    console.warn("[PA] Constructor.io extraction returned 0. Trying primary DOM extractor...");
-    const primary = await extractProducts(page);
-    products = primary.products;
-    anchorsTotal = primary.anchorsTotal;
-  }
-
-  if (!products.length) {
-    console.warn("[PA] Primary extraction returned 0. Trying DOM fallback...");
-    const fallback = await extractProductsDomFallback(page);
-    products = fallback.products;
-    anchorsTotal = fallback.anchorsTotal;
-    usedDomFallback = true;
-  }
-
-  const hasHref = products.some((p) =>
-    normalizeHref(p?.productUrl || p?.href || p?.url || p?.link)
-  );
-
-  if (!products.length || !hasHref) {
-    console.warn("[PA] DOM still 0. Trying network JSON fallback...");
-    products = extractProductsFromNetwork(jsonResponses);
-    anchorsTotal = anchorsTotal || products.length;
-    usedNetworkFallback = true;
-  }
-
-  return { products, usedDomFallback, usedNetworkFallback, anchorsTotal };
+  return {
+    products,
+    usedDomFallback: false,
+    usedNetworkFallback: false,
+    anchorsTotal: tilesFound,
+    tilesFound,
+  };
 }
 
 async function extractProducts(page) {
-  console.log("🔍 Extracting products...");
-  const { products, tileCount, visibleProducts, anchorsTotal } = await page.evaluate(
-    ({ productSelector, selectors }) => {
-      const tiles = Array.from(document.querySelectorAll(productSelector)).filter((tile) =>
-        selectors.some((selector) => tile.querySelector(selector))
-      );
-      const deduped = new Map();
-      const visibleKeys = new Set();
-      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-      let anchorsTotal = 0;
+  console.log("🔍 Extracting products with Princess Auto card selectors...");
+  const { products, tilesFound } = await page.evaluate(() => {
+    const BASE = "https://www.princessauto.com";
+    const tiles = Array.from(document.querySelectorAll("div.cc-product-card"));
+    const seen = new Set();
+    const products = [];
 
-      const normalizeUrl = (href) => {
-        if (!href) return null;
-        try {
-          const url = new URL(href, document.baseURI);
-          if (url.searchParams.get("ratings") === "reviews") {
-            url.searchParams.delete("ratings");
-          }
-          const cleanedSearch = url.searchParams.toString();
-          const base = `${url.origin}${url.pathname}`;
-          return `${base}${cleanedSearch ? `?${cleanedSearch}` : ""}`.split("#")[0];
-        } catch (error) {
-          return null;
-        }
-      };
-
-      const normalizePriceText = (value) => {
-        if (value === null || value === undefined) return null;
-        const str = String(value).replace(/[^0-9.,-]/g, "").trim();
-        if (!str) return null;
-
-        const hasCommaDecimal = str.includes(",") && !str.includes(".");
-        let normalized = hasCommaDecimal ? str.replace(",", ".") : str;
-        normalized = normalized.replace(/,/g, "").replace(/\s+/g, "");
-
-        const num = parseFloat(normalized);
-        return Number.isFinite(num) ? num : null;
-      };
-
-      const extractSku = (tile) => {
-        const attrSku = Array.from(tile.attributes)
-          .map((attr) => ({ name: attr.name.toLowerCase(), value: attr.value?.trim() || "" }))
-          .find(({ name }) => name.includes("sku") || name.includes("productid") || name.includes("product-id"));
-        if (attrSku?.value) return attrSku.value;
-
-        const dataSku = tile.getAttribute("data-sku") || tile.getAttribute("data-productid") || tile.getAttribute("data-product-id");
-        if (dataSku) return dataSku.trim();
-
-        const text = (tile.textContent || "").replace(/ratings=reviews/gi, "");
-        const directMatch = text.match(/(?:SKU|UGS|Item|Model)\s*[:#]?\s*([A-Z0-9-]+)/i);
-        if (directMatch?.[1]) return directMatch[1].trim();
-
-        return "";
-      };
-
-      for (const tile of tiles) {
-        const anchor = selectors
-          .map((selector) => tile.querySelector(selector))
-          .find((el) => el?.getAttribute("href") || el?.href);
-        if (!anchor) continue;
-        anchorsTotal += 1;
-        const href = anchor.getAttribute("href") || anchor.href;
-        if (!href) continue;
-        const url = normalizeUrl(href);
-
-        if (!url || deduped.has(url)) continue;
-
-        const getText = (selector) => tile.querySelector(selector)?.textContent?.trim() || null;
-
-        const titleFromAttr = anchor.getAttribute("title") || anchor.getAttribute("aria-label");
-        const title =
-          titleFromAttr ||
-          (anchor.textContent || "").trim() ||
-          getText("[itemprop='name']") ||
-          getText(".product-name") ||
-          getText(".product-title");
-
-        const imageEl =
-          anchor.querySelector("img") ||
-          tile.querySelector("img") ||
-          tile.querySelector("[data-testid='product-image'] img");
-        const imageUrl =
-          imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-lazy") || null;
-
-        const currentPriceText =
-          getText(".sales") ||
-          getText(".price-sales") ||
-          getText(".product-price") ||
-          getText(".current-price") ||
-          getText("[data-price-type='finalPrice']") ||
-          getText(".price") ||
-          getText("[class*='current']") ||
-          null;
-        const originalPriceText =
-          getText(".strike-through") ||
-          getText(".price-standard") ||
-          getText(".old-price") ||
-          getText(".was-price") ||
-          getText("[class*='was']") ||
-          null;
-
-        const sku = extractSku(tile);
-
-        if (!title || !url) continue;
-
-        const rect = tile.getBoundingClientRect();
-        const isVisible =
-          rect.width > 0 &&
-          rect.height > 0 &&
-          rect.bottom > 0 &&
-          rect.right > 0 &&
-          rect.top < viewportHeight &&
-          rect.left < viewportWidth;
-
-        if (isVisible) {
-          visibleKeys.add(url);
-        }
-
-        deduped.set(url, {
-          name: title,
-          productUrl: url,
-          imageUrl,
-          priceRegular: normalizePriceText(originalPriceText),
-          priceSale: normalizePriceText(currentPriceText),
-          sku,
-        });
+    const normalizeUrl = (href) => {
+      if (!href || /ratings=reviews/i.test(href)) return null;
+      try {
+        const url = new URL(href, BASE);
+        url.search = "";
+        url.hash = "";
+        return `${url.origin}${url.pathname}`;
+      } catch (error) {
+        return null;
       }
+    };
 
-      return {
-        tileCount: tiles.length,
-        products: Array.from(deduped.values()),
-        visibleProducts: visibleKeys.size,
-        anchorsTotal,
-      };
-    },
-    { productSelector: PRODUCT_TILE_SELECTOR, selectors: PRODUCT_LINK_SELECTORS }
-  );
+    for (const tile of tiles) {
+      const name =
+        tile.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
+        null;
 
-  console.log(`🧱 Product tiles detected before extraction: ${tileCount}`);
-  console.log(`🫧 Visible products in viewport: ${visibleProducts}`);
+      const href =
+        tile.querySelector("a[id^='CC-product-title-']")?.getAttribute("href") || null;
+      const productUrl = normalizeUrl(href);
+
+      if (!productUrl || seen.has(productUrl)) continue;
+
+      const imgEl = tile.querySelector("img.cclazyLoaded");
+      const imageUrl =
+        imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
+
+      const skuText =
+        tile.querySelector(".cc-product-sku-container")?.textContent || "";
+      const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
+      const sku = skuMatch ? skuMatch[1] : null;
+
+      const priceRegularText =
+        tile.querySelector(".cc-product-before-price")?.textContent || null;
+      const priceSaleText =
+        tile.querySelector(".cc-product-after-price")?.textContent || null;
+
+      products.push({
+        name,
+        imageUrl,
+        productUrl,
+        sku,
+        priceRegular: priceRegularText,
+        priceSale: priceSaleText,
+      });
+
+      seen.add(productUrl);
+    }
+
+    return { products, tilesFound: tiles.length };
+  });
+
+  console.log(`🧱 tilesFound=${tilesFound}`);
   console.log(`Products extracted: ${products.length}`);
-  return { products, anchorsTotal };
+  return { products, tilesFound };
 }
 
 function normalizeHref(href) {
   if (!href) return null;
+  if (/ratings=reviews/i.test(href)) return null;
   try {
     const url = new URL(href, BASE_URL);
-    if (url.searchParams.get("ratings") === "reviews") {
-      url.searchParams.delete("ratings");
-    }
-    const cleanedSearch = url.searchParams.toString();
-    const base = `${url.origin}${url.pathname}`;
-    return `${base}${cleanedSearch ? `?${cleanedSearch}` : ""}`.split("#")[0];
+    url.search = "";
+    url.hash = "";
+    return `${url.origin}${url.pathname}`;
   } catch (error) {
     return null;
   }
@@ -958,9 +848,14 @@ function normalizeProduct(product = {}) {
   );
   const name = (product.name || product.title || "").trim();
   const imageUrl = product.imageUrl || product.image || null;
-  const priceRegular = normalizePrice(product.priceRegular ?? product.price);
-  const priceSale = normalizePrice(product.priceSale ?? product.price);
-  const sku = product.sku ?? "";
+  let priceRegular = normalizePrice(product.priceRegular ?? product.price);
+  let priceSale = normalizePrice(product.priceSale ?? product.price);
+  const sku = product.sku ?? null;
+
+  if (priceSale === null && priceRegular !== null) {
+    priceSale = priceRegular;
+    priceRegular = null;
+  }
 
   if (!productUrl) return null;
 
@@ -989,7 +884,7 @@ function normalizeProducts(products = []) {
   return out;
 }
 
-function writeStoreOutput(store, products, storeSynced = true, anchorsTotal = 0) {
+function writeStoreOutput(store, products, storeSynced = true, tilesFound = 0) {
   const slug = store.slug;
   const storeDir = path.join(OUTPUT_ROOT, slug);
   const outputFile = path.join(storeDir, "data.json");
@@ -999,8 +894,6 @@ function writeStoreOutput(store, products, storeSynced = true, anchorsTotal = 0)
   fs.mkdirSync(storeDir, { recursive: true });
 
   const csvHeaders = [
-    "storeSlug",
-    "scrapedAt",
     "name",
     "imageUrl",
     "productUrl",
@@ -1019,29 +912,26 @@ function writeStoreOutput(store, products, storeSynced = true, anchorsTotal = 0)
     return str;
   };
 
-  const productsWithMeta = products.map((product) => ({
-    ...product,
-    storeSlug: slug,
-    scrapedAt,
-  }));
+  const normalizedProducts = products;
 
-  for (const product of productsWithMeta) {
+  for (const product of normalizedProducts) {
     const row = csvHeaders.map((key) => escapeCsv(product[key])).join(",");
     csvRows.push(row);
   }
 
   fs.writeFileSync(csvFile, csvRows.join("\n"), "utf8");
 
-  fs.writeFileSync(outputFile, JSON.stringify(productsWithMeta, null, 2), "utf8");
+  fs.writeFileSync(outputFile, JSON.stringify(normalizedProducts, null, 2), "utf8");
 
-  const withSkuCount = productsWithMeta.filter((p) => p.sku).length;
-  const missingSkuCount = productsWithMeta.length - withSkuCount;
+  const withSkuCount = normalizedProducts.filter((p) => p.sku).length;
+  const withSalePriceCount = normalizedProducts.filter((p) => p.priceSale !== null).length;
 
-  console.log(
-    `📊 anchorsTotal=${anchorsTotal} uniqueProducts=${productsWithMeta.length} withSkuCount=${withSkuCount} missingSkuCount=${missingSkuCount}`
-  );
-  console.log(`💾 JSON written → ${outputFile}`);
-  console.log(`💾 CSV written → ${csvFile}`);
+  console.log(`tilesFound=${tilesFound}`);
+  console.log(`uniqueProducts=${normalizedProducts.length}`);
+  console.log(`withSkuCount=${withSkuCount}`);
+  console.log(`withSalePriceCount=${withSalePriceCount}`);
+  console.log(`wroteCsvPath=${csvFile}`);
+  console.log(`wroteJsonPath=${outputFile}`);
 
   return {
     storeName: store.name || store.storeName,
@@ -1054,7 +944,7 @@ function writeStoreOutput(store, products, storeSynced = true, anchorsTotal = 0)
     slug: store.slug,
     updatedAt: scrapedAt,
     storeSynced,
-    products: productsWithMeta,
+    products: normalizedProducts,
   };
 }
 
@@ -1138,7 +1028,7 @@ async function processStore(page, store) {
     const jsonResponses = await setStoreThenGoToSale(page, store, debugPaths);
     await ensureOnSalePage(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    const { products: allProducts, anchorsTotal } = await loadProductsByPagination(
+    const { products: allProducts, tilesFound } = await loadProductsByPagination(
       page,
       store,
       jsonResponses,
@@ -1183,7 +1073,7 @@ async function processStore(page, store) {
       deleteDebugArtifacts(debugPaths);
     }
 
-    return writeStoreOutput(store, allProducts, storeSynced, anchorsTotal);
+    return writeStoreOutput(store, allProducts, storeSynced, tilesFound);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
     debugPaths.push(...(await captureDebug(page, store.slug, "store_failed")));
