@@ -64,7 +64,7 @@ jobs:
           set -e
 
           rm -rf _econoplus
-          git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/${ECONOPLUS_REPO}.git _econoplus
+          git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/Olivier-cousineau/econoplus.git _econoplus
 
           mkdir -p _econoplus/public/princessauto
 
