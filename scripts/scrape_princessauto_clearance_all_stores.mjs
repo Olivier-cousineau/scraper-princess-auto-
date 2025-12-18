@@ -9,7 +9,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const BASE_URL = "https://www.princessauto.com";
 const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
-const SALE_URL = withInStoreFacet(SALE_BASE_URL);
+const SALE_URL = withNrpp(SALE_BASE_URL);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
 const CONCURRENCY = Number(process.env.PA_CONCURRENCY ?? "1");
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
@@ -28,8 +28,13 @@ const PRODUCT_LINK_SELECTORS = [
 
 function withInStoreFacet(url) {
   const u = new URL(url);
-  u.searchParams.set("Nrpp", String(NRPP));
   u.searchParams.set("facet.availability", "56");
+  return u.toString();
+}
+
+function withNrpp(url) {
+  const u = new URL(url);
+  u.searchParams.set("Nrpp", String(NRPP));
   return u.toString();
 }
 
@@ -161,6 +166,22 @@ async function waitForProductsGrid(page) {
   }
 }
 
+async function waitForSaleHydration(page) {
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(1000);
+
+  const anchorSelector = "a[href*='/product/']:not([href*='ratings=reviews'])";
+  const candidates = [anchorSelector, "div.cc-product-card"]; // signal readiness
+
+  try {
+    await Promise.race(
+      candidates.map((selector) => page.waitForSelector(selector, { timeout: 15000 }))
+    );
+  } catch (error) {
+    await page.waitForLoadState("networkidle").catch(() => {});
+  }
+}
+
 async function preparePageForExtraction(page) {
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(1200);
@@ -186,6 +207,22 @@ async function preparePageForExtraction(page) {
       break;
     } catch {}
   }
+}
+
+async function gatherProductAnchorMetrics(page) {
+  return page.evaluate(() => {
+    const anchors = Array.from(
+      document.querySelectorAll("a[href*='/product/']:not([href*='ratings=reviews'])")
+    );
+    const rawHref = anchors[0]?.getAttribute("href") || anchors[0]?.href || null;
+    let sampleAnchorHref = rawHref;
+    if (rawHref) {
+      try {
+        sampleAnchorHref = new URL(rawHref, document.baseURI).href;
+      } catch (error) {}
+    }
+    return { count: anchors.length, sampleAnchorHref };
+  });
 }
 
 async function getFirstGridHref(page) {
@@ -314,13 +351,6 @@ async function clickConstructorNextAndWait(page) {
   return { moved: false, reason: "no_change" };
 }
 
-async function navigateToSale(page) {
-  console.log(`➡️ Navigating to sale page: ${SALE_URL}`);
-  await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await waitForProductsGrid(page);
-}
-
 function escapeRegex(text = "") {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -380,23 +410,47 @@ async function ensureOnSalePage(page) {
   return { recovered, productVisible };
 }
 
-async function ensureSaleFacetAndNrpp(page) {
-  const currentUrl = page.url().split("#")[0];
-  if (!/\/category\/sale/i.test(currentUrl)) {
-    return { applied: false, url: currentUrl };
+async function goToSaleWithFacetGuard(page) {
+  const saleBaseUrl = SALE_URL;
+  const facetSaleUrl = withInStoreFacet(saleBaseUrl);
+  let usedFacetAvailability = false;
+
+  const navigateAndMeasure = async (targetUrl) => {
+    console.log(`➡️ Navigating to sale page: ${targetUrl}`);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    await waitForSaleHydration(page);
+    const anchorMetrics = await gatherProductAnchorMetrics(page);
+    return anchorMetrics;
+  };
+
+  let anchorMetrics = await navigateAndMeasure(facetSaleUrl);
+
+  if (anchorMetrics.count === 0) {
+    console.log("facet_availability_disabled_for_store=true");
+    anchorMetrics = await navigateAndMeasure(saleBaseUrl);
+  } else {
+    usedFacetAvailability = true;
   }
 
-  const targetUrl = withInStoreFacet(currentUrl);
-  if (targetUrl === currentUrl) {
-    return { applied: false, url: currentUrl };
-  }
+  return { usedFacetAvailability, anchorMetrics };
+}
 
-  console.log(
-    `ℹ️ Applying in-store facet and Nrpp to Sale URL: ${targetUrl}`
-  );
-  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  return { applied: true, url: targetUrl };
+async function logPageOneDiagnostics(
+  page,
+  { usedFacetAvailability, tilesFound, productAnchorsFound, sampleAnchorHref }
+) {
+  const pageTitle = (await page.title().catch(() => "")) || "";
+  const hasNoResultsText = await page
+    .locator("text=/No results/i")
+    .first()
+    .isVisible({ timeout: 1500 })
+    .catch(() => false);
+
+  console.log(`usedFacetAvailability=${usedFacetAvailability}`);
+  console.log(`tilesFound=${tilesFound}`);
+  console.log(`productAnchorsFound=${productAnchorsFound}`);
+  console.log(`sampleAnchorHref=${sampleAnchorHref || ""}`);
+  console.log(`pageTitle=${pageTitle} hasNoResultsText=${hasNoResultsText}`);
 }
 
 async function setStoreThenGoToSale(page, store, debugPaths = []) {
@@ -478,12 +532,19 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   await page.waitForTimeout(4000);
   await ensureOnSalePage(page);
-  await ensureSaleFacetAndNrpp(page);
-  return jsonResponses;
+
+  const saleNavigationMeta = await goToSaleWithFacetGuard(page);
+  return { jsonResponses, saleNavigationMeta };
 }
 
 
-async function loadProductsByPagination(page, store, jsonResponses = [], debugPaths = []) {
+async function loadProductsByPagination(
+  page,
+  store,
+  jsonResponses = [],
+  debugPaths = [],
+  saleNavigationMeta = {}
+) {
   const allProducts = [];
   const seen = new Set();
   let prevSignature = null;
@@ -491,26 +552,28 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
   let recoveredFromLocations = false;
   let firstPageZeroRetry = false;
   let totalTilesFound = 0;
+  const usedFacetAvailability = !!saleNavigationMeta?.usedFacetAvailability;
+  let anchorMetricsFromNavigation = saleNavigationMeta?.anchorMetrics || null;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
       let { recovered, productVisible } = await ensureOnSalePage(page);
       recoveredFromLocations = recoveredFromLocations || recovered;
-      const facetApplied = await ensureSaleFacetAndNrpp(page);
-
-      if (facetApplied.applied) {
-        const postFacet = await ensureOnSalePage(page);
-        recovered = recovered || postFacet.recovered;
-        productVisible = postFacet.productVisible;
-        recoveredFromLocations = recoveredFromLocations || postFacet.recovered;
-      }
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
-      const extractionMeta = await extractProductsWithFallbacks(
+      let anchorMetrics = anchorMetricsFromNavigation;
+      if (anchorMetricsFromNavigation) {
+        anchorMetricsFromNavigation = null;
+      } else {
+        anchorMetrics = await gatherProductAnchorMetrics(page);
+      }
+
+      let extractionMeta = await extractProductsWithFallbacks(
         page,
         jsonResponses,
-        pageNum
+        pageNum,
+        anchorMetrics
       );
       totalTilesFound += extractionMeta.tilesFound || 0;
       let productsOnPage = normalizeProducts(extractionMeta.products);
@@ -528,14 +591,27 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         await ensureOnSalePage(page);
         await page.waitForLoadState("networkidle").catch(() => {});
         await waitForProductsGrid(page);
+        const retryAnchorMetrics = await gatherProductAnchorMetrics(page);
         const retryExtraction = await extractProductsWithFallbacks(
           page,
           jsonResponses,
-          pageNum
+          pageNum,
+          retryAnchorMetrics
         );
         totalTilesFound += retryExtraction.tilesFound || 0;
         productsOnPage = normalizeProducts(retryExtraction.products);
         productCount = productsOnPage.length;
+        anchorMetrics = retryAnchorMetrics;
+        extractionMeta = retryExtraction;
+      }
+
+      if (pageNum === 1) {
+        await logPageOneDiagnostics(page, {
+          usedFacetAvailability,
+          tilesFound: extractionMeta.tilesFound,
+          productAnchorsFound: extractionMeta.productAnchorsFound,
+          sampleAnchorHref: anchorMetrics?.sampleAnchorHref ?? extractionMeta.sampleAnchorHref,
+        });
       }
 
       const currentUrlNoHash = page.url().split("#")[0];
@@ -753,13 +829,29 @@ async function extractProductsFromConstructorDom(page) {
   return { products: normalized, anchorsTotal: normalized.length };
 }
 
-async function extractProductsWithFallbacks(page, jsonResponses = [], pageNum = 1) {
+async function extractProductsWithFallbacks(
+  page,
+  jsonResponses = [],
+  pageNum = 1,
+  anchorMetrics
+) {
   await preparePageForExtraction(page);
+
+  const metrics = anchorMetrics || (await gatherProductAnchorMetrics(page));
+  const productAnchorsFound = metrics?.count ?? 0;
+  const sampleAnchorHref = metrics?.sampleAnchorHref ?? null;
+
   const primary = await extractProducts(page, pageNum);
   const normalizedPrimary = normalizeProducts(primary.products);
 
-  if (normalizedPrimary.length === 0 && primary.tilesFound > 0) {
-    console.warn("⚠️ Primary tile extraction returned 0 products; using anchor fallback");
+  const shouldUseAnchorFallback =
+    (normalizedPrimary.length === 0 && primary.tilesFound > 0) ||
+    (primary.tilesFound === 0 && productAnchorsFound > 0);
+
+  if (shouldUseAnchorFallback) {
+    console.warn(
+      "⚠️ Primary tile extraction insufficient; using anchor-based fallback extraction"
+    );
     const anchorFallback = await extractProductsFromAnchors(page);
     console.log(
       `FALLBACK_ANCHORS_USED=true anchorsFound=${anchorFallback.tilesFound} productsAfterDedup=${anchorFallback.products.length}`
@@ -770,6 +862,8 @@ async function extractProductsWithFallbacks(page, jsonResponses = [], pageNum = 
       usedNetworkFallback: false,
       anchorsTotal: anchorFallback.tilesFound,
       tilesFound: primary.tilesFound,
+      productAnchorsFound,
+      sampleAnchorHref,
     };
   }
 
@@ -779,6 +873,8 @@ async function extractProductsWithFallbacks(page, jsonResponses = [], pageNum = 
     usedNetworkFallback: false,
     anchorsTotal: primary.tilesFound,
     tilesFound: primary.tilesFound,
+    productAnchorsFound,
+    sampleAnchorHref,
   };
 }
 
@@ -904,7 +1000,12 @@ async function extractProductsFromAnchors(page) {
       if (!productUrl || seen.has(productUrl)) continue;
 
       const tile = anchor.closest("[data-testid='product-tile'], [data-testid='product-card'], article[data-product-id], li.product-tile, div.product-tile, div.product-grid__item, li.product-grid__item");
+      const cardCandidate =
+        tile ||
+        anchor.closest(".cc-product-card, .product-tile, .product-card, [data-oe-item-id]") ||
+        anchor.closest("div, li, article");
       const imgCandidate =
+        cardCandidate?.querySelector("img") ||
         tile?.querySelector("img") ||
         anchor.parentElement?.querySelector("img") ||
         anchor.nextElementSibling?.querySelector?.("img") ||
@@ -916,13 +1017,26 @@ async function extractProductsFromAnchors(page) {
 
       const name = anchor.textContent?.trim() || null;
 
+      const priceRegularText =
+        cardCandidate?.querySelector?.(".cc-product-before-price")?.textContent?.trim() || null;
+      let priceSaleText =
+        cardCandidate?.querySelector?.(".cc-product-after-price")?.textContent?.trim() ||
+        cardCandidate?.querySelector?.(".cc-product-price")?.textContent?.trim() ||
+        null;
+
+      const skuFromAttr = cardCandidate?.getAttribute("data-oe-item-id") || null;
+      const skuText =
+        cardCandidate?.querySelector(".cc-product-sku-container")?.textContent || "";
+      const skuMatch = skuText.match(/UGS:\s*(\d+)/i);
+      const sku = skuFromAttr || (skuMatch ? skuMatch[1] : null);
+
       products.push({
         productUrl,
         name,
         imageUrl,
-        priceRegular: null,
-        priceSale: null,
-        sku: null,
+        priceRegular: priceRegularText,
+        priceSale: priceSaleText,
+        sku,
       });
 
       seen.add(productUrl);
@@ -1130,14 +1244,19 @@ async function processStore(page, store) {
   let storeSynced = true;
 
   try {
-    const jsonResponses = await setStoreThenGoToSale(page, store, debugPaths);
+    const { jsonResponses, saleNavigationMeta } = await setStoreThenGoToSale(
+      page,
+      store,
+      debugPaths
+    );
     await ensureOnSalePage(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     const { products: allProducts, tilesFound } = await loadProductsByPagination(
       page,
       store,
       jsonResponses,
-      debugPaths
+      debugPaths,
+      saleNavigationMeta
     );
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
