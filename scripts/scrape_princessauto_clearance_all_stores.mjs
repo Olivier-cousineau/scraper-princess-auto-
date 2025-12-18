@@ -10,7 +10,7 @@ const BASE_URL = "https://www.princessauto.com";
 const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
 const SALE_URL = withNrpp(SALE_BASE_URL);
-const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
+const MAX_PAGES = parseInt(process.env.MAX_PAGES || "40", 10);
 const CONCURRENCY = Number(
   process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
 );
@@ -38,6 +38,205 @@ function withNrpp(url) {
   const u = new URL(url);
   u.searchParams.set("Nrpp", String(NRPP));
   return u.toString();
+}
+
+async function humanScrollToBottom(page) {
+  await page.evaluate(async () => {
+    const jitter = () => {
+      window.scrollBy({ top: 120, behavior: "smooth" });
+      window.scrollBy({ top: -80, behavior: "smooth" });
+    };
+
+    const step = async () => {
+      const { scrollHeight, clientHeight } = document.documentElement;
+      const maxScrollTop = scrollHeight - clientHeight;
+      for (let y = 0; y < maxScrollTop; y += 650) {
+        window.scrollTo({ top: y, behavior: "smooth" });
+        jitter();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      window.scrollTo({ top: maxScrollTop, behavior: "smooth" });
+    };
+
+    await step();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  });
+}
+
+async function waitForDomStable(page, { timeoutMs = 12000 } = {}) {
+  return page.evaluate(
+    (timeout) =>
+      new Promise((resolve) => {
+        let timeoutId = null;
+        let idleId = null;
+
+        const done = () => {
+          clearTimeout(timeoutId);
+          clearTimeout(idleId);
+          observer.disconnect();
+          resolve();
+        };
+
+        const observer = new MutationObserver(() => {
+          clearTimeout(idleId);
+          idleId = setTimeout(done, 800);
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+        idleId = setTimeout(done, 800);
+        timeoutId = setTimeout(done, timeout);
+      }),
+    timeoutMs
+  );
+}
+
+async function extractProductsFromSalePage(page) {
+  return page.evaluate(({ tileSelector, linkSelectors }) => {
+    const tiles = Array.from(document.querySelectorAll(tileSelector));
+    const seen = new Set();
+    const products = [];
+
+    const normalizeUrl = (href) => {
+      if (!href || /ratings=reviews/i.test(href)) return null;
+      try {
+        const url = new URL(href, document.baseURI);
+        url.search = "";
+        url.hash = "";
+        return `${url.origin}${url.pathname}`;
+      } catch (error) {
+        return null;
+      }
+    };
+
+    const pickImageUrl = (el) => {
+      if (!el) return null;
+      const candidates = [
+        el.getAttribute("src"),
+        el.getAttribute("data-src"),
+        el.getAttribute("data-original"),
+      ].filter(Boolean);
+      const raw = candidates.find(Boolean) || null;
+      if (!raw) return null;
+      return raw.startsWith("//") ? `https:${raw}` : raw;
+    };
+
+    for (const tile of tiles) {
+      const link = linkSelectors
+        .map((selector) => tile.querySelector(selector))
+        .find(Boolean);
+      const rawHref = link?.getAttribute("href") || link?.href || null;
+      const productUrl = normalizeUrl(rawHref);
+      if (!productUrl || seen.has(productUrl)) continue;
+
+      const name =
+        tile.getAttribute("data-oe-item-name") ||
+        tile.querySelector("[data-oe-item-name]")?.getAttribute("data-oe-item-name") ||
+        tile.querySelector("[aria-label]")?.getAttribute("aria-label") ||
+        tile.querySelector("h2,h3")?.textContent?.trim() ||
+        tile.textContent?.trim() ||
+        "";
+
+      const img = tile.querySelector("img");
+      const imageUrl = pickImageUrl(img);
+
+      const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
+      const sku = skuMatch?.[1] || null;
+
+      const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
+      const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
+
+      products.push({
+        productUrl,
+        name,
+        imageUrl,
+        sku,
+        priceRegular: priceRegularText,
+        priceSale: priceSaleText,
+      });
+
+      seen.add(productUrl);
+    }
+
+    return { products, tilesFound: tiles.length };
+  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+}
+
+async function goToNextPageUI(page) {
+  const selectors = [
+    "a[rel='next']",
+    "a[aria-label*='next' i]",
+    "button[aria-label*='next' i]",
+    ".pagination-next a",
+    "a.pagination__next",
+  ];
+
+  let target = null;
+  for (const sel of selectors) {
+    const locator = page.locator(sel).first();
+    if ((await locator.count()) && (await locator.isVisible().catch(() => false))) {
+      target = locator;
+      break;
+    }
+  }
+
+  if (!target) return { moved: false, reason: "next_not_found" };
+
+  const cls = (await target.getAttribute("class")) || "";
+  const ariaDisabled = (await target.getAttribute("aria-disabled")) || "";
+  if (/disabled/i.test(cls) || /true/i.test(ariaDisabled)) {
+    return { moved: false, reason: "next_disabled" };
+  }
+
+  const prevSignature = await page.evaluate(({ tileSelector, linkSelectors }) => {
+    const tiles = Array.from(document.querySelectorAll(tileSelector));
+    const firstTile = tiles[0];
+    if (!firstTile) return null;
+    const link = linkSelectors
+      .map((selector) => firstTile.querySelector(selector))
+      .find(Boolean);
+    return link?.getAttribute("href") || null;
+  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+
+  await Promise.all([
+    target.click({ timeout: 12000 }).catch(() => {}),
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null),
+  ]);
+
+  await waitForDomStable(page);
+
+  const afterSignature = await page.evaluate(({ tileSelector, linkSelectors }) => {
+    const tiles = Array.from(document.querySelectorAll(tileSelector));
+    const firstTile = tiles[0];
+    if (!firstTile) return null;
+    const link = linkSelectors
+      .map((selector) => firstTile.querySelector(selector))
+      .find(Boolean);
+    return link?.getAttribute("href") || null;
+  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+
+  const moved = (!!afterSignature && afterSignature !== prevSignature) || page.url().includes("page=");
+  return { moved, reason: moved ? "navigated" : "no_change" };
+}
+
+async function saveDebug(page, outDir, prefix, extraNotes = []) {
+  const htmlPath = path.join(outDir, `${prefix}.html`);
+  const screenshotPath = path.join(outDir, `${prefix}.png`);
+
+  try {
+    const html = await page.content();
+    const htmlWithNotes =
+      extraNotes.length > 0
+        ? `${html}\n<!-- DEBUG NOTES:\n${extraNotes.join("\n")}\n-->`
+        : html;
+    fs.writeFileSync(htmlPath, htmlWithNotes, "utf8");
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`📝 Saved debug HTML: ${htmlPath}`);
+    console.log(`📸 Saved debug screenshot: ${screenshotPath}`);
+  } catch (error) {
+    console.warn("⚠️ Failed to save debug artifacts:", error);
+  }
+
+  return [htmlPath, screenshotPath];
 }
 
 function attachJsonResponseCollector(page) {
@@ -386,7 +585,9 @@ async function ensureOnSalePage(page) {
   let recovered = false;
   if (page.url().includes("/locations")) {
     console.warn("⚠️ Detected /locations page; navigating back to Sale");
-    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+    await page.goto(withInStoreFacet(withNrpp(SALE_BASE_URL)), {
+      waitUntil: "domcontentloaded",
+    });
     recovered = true;
   }
 
@@ -522,18 +723,20 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
   await dismissMakeStoreModal(page);
   debugPaths.push(...(await captureDebug(page, store.slug, "after_modal_dismiss")));
 
+  const targetSaleUrl = withInStoreFacet(withNrpp(SALE_BASE_URL));
   const saleLink = page.getByRole("link", { name: /vente|sale/i }).first();
   if (await saleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
     await saleLink.click({ timeout: 10000 }).catch(() => {});
   } else {
-    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+    await page.goto(targetSaleUrl, { waitUntil: "domcontentloaded" });
   }
   if (page.url().includes("/locations")) {
-    await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
+    await page.goto(targetSaleUrl, { waitUntil: "domcontentloaded" });
   }
 
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(1500);
   await ensureOnSalePage(page);
+  await waitForDomStable(page);
 
   const saleNavigationMeta = await goToSaleWithFacetGuard(page);
   return { jsonResponses, saleNavigationMeta };
@@ -548,145 +751,65 @@ async function loadProductsByPagination(
   saleNavigationMeta = {}
 ) {
   const allProducts = [];
-  const seen = new Set();
-  let prevSignature = null;
+  const seenUrls = new Set();
+  const seenSku = new Set();
   let zeroGainStreak = 0;
-  let recoveredFromLocations = false;
-  let firstPageZeroRetry = false;
   let totalTilesFound = 0;
+  let uiTotal = null;
   const usedFacetAvailability = !!saleNavigationMeta?.usedFacetAvailability;
-  let anchorMetricsFromNavigation = saleNavigationMeta?.anchorMetrics || null;
+
+  const readUiTotal = async () => {
+    const text = await page.textContent("text=/\\d+\\s*(?:items|results)/i").catch(() => null);
+    if (!text) return null;
+    const match = text.match(/(\d+)\s*(?:items|results)/i);
+    return match?.[1] ? Number(match[1]) : null;
+  };
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
-      let { recovered, productVisible } = await ensureOnSalePage(page);
-      recoveredFromLocations = recoveredFromLocations || recovered;
-      await page.waitForLoadState("networkidle").catch(() => {});
-      await waitForProductsGrid(page);
+      await ensureOnSalePage(page);
+      await humanScrollToBottom(page);
+      await waitForDomStable(page);
 
-      let anchorMetrics = anchorMetricsFromNavigation;
-      if (anchorMetricsFromNavigation) {
-        anchorMetricsFromNavigation = null;
-      } else {
-        anchorMetrics = await gatherProductAnchorMetrics(page);
+      const extraction = await extractProductsFromSalePage(page);
+      totalTilesFound += extraction.tilesFound || 0;
+      const normalized = normalizeProducts(extraction.products);
+
+      const uniqueProducts = [];
+      for (const product of normalized) {
+        const key = product.productUrl;
+        const skuKey = product.sku;
+        const alreadySeen = (key && seenUrls.has(key)) || (skuKey && seenSku.has(skuKey));
+        if (alreadySeen) continue;
+        if (key) seenUrls.add(key);
+        if (skuKey) seenSku.add(skuKey);
+        uniqueProducts.push(product);
       }
-
-      let extractionMeta = await extractProductsWithFallbacks(
-        page,
-        jsonResponses,
-        pageNum,
-        anchorMetrics
-      );
-      totalTilesFound += extractionMeta.tilesFound || 0;
-      let productsOnPage = normalizeProducts(extractionMeta.products);
-      let productCount = productsOnPage.length;
-
-      console.log(
-        `[PA] Page ${pageNum} tile diagnostics: tilesFound=${extractionMeta.tilesFound} tileWithSkuCount=${extractionMeta.tileWithSkuCount} tileWithPricesCount=${extractionMeta.tileWithPricesCount} tileWithUrlCount=${extractionMeta.tileWithUrlCount}`
-      );
-
-      if (
-        productsOnPage.length === 0 &&
-        pageNum === 1 &&
-        (recovered || recoveredFromLocations || !productVisible) &&
-        !firstPageZeroRetry
-      ) {
-        console.warn("⚠️ No products on first page after recovery attempt; retrying once...");
-        firstPageZeroRetry = true;
-        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-        await ensureOnSalePage(page);
-        await page.waitForLoadState("networkidle").catch(() => {});
-        await waitForProductsGrid(page);
-        const retryAnchorMetrics = await gatherProductAnchorMetrics(page);
-        const retryExtraction = await extractProductsWithFallbacks(
-          page,
-          jsonResponses,
-          pageNum,
-          retryAnchorMetrics
-        );
-        totalTilesFound += retryExtraction.tilesFound || 0;
-        productsOnPage = normalizeProducts(retryExtraction.products);
-        productCount = productsOnPage.length;
-        anchorMetrics = retryAnchorMetrics;
-        extractionMeta = retryExtraction;
-        console.log(
-          `[PA] Page ${pageNum} retry tile diagnostics: tilesFound=${extractionMeta.tilesFound} tileWithSkuCount=${extractionMeta.tileWithSkuCount} tileWithPricesCount=${extractionMeta.tileWithPricesCount} tileWithUrlCount=${extractionMeta.tileWithUrlCount}`
-        );
-      }
-
-      if (pageNum === 1) {
-        await logPageOneDiagnostics(page, {
-          usedFacetAvailability,
-          tilesFound: extractionMeta.tilesFound,
-          productAnchorsFound: extractionMeta.productAnchorsFound,
-          sampleAnchorHref: anchorMetrics?.sampleAnchorHref ?? extractionMeta.sampleAnchorHref,
-        });
-      }
-
-      const currentUrlNoHash = page.url().split("#")[0];
-      const first = productsOnPage[0];
-      const firstProductHref =
-        first?.productUrl ||
-        first?.href ||
-        first?.url ||
-        first?.link ||
-        (await getFirstGridHref(page));
-      const currentPageUrls = productsOnPage
-        .map((product) =>
-          product.productUrl ||
-            product.href ||
-            product.url ||
-            product.id ||
-            product.title ||
-            product.name ||
-            ""
-        )
-        .filter(Boolean);
-      const signatureParts = [
-        currentPageUrls.slice(0, 10).join("|"),
-        currentPageUrls.slice(-10).join("|"),
-      ];
-      const pageSignature = signatureParts.join("||");
-
-      console.log(
-        `📄 Page ${pageNum}: currentUrlNoHash=${currentUrlNoHash} | products=${productCount} | firstProductHref=${firstProductHref || "none"}`
-      );
-
-      if (prevSignature && pageSignature === prevSignature) {
-        console.log("🛑 Stop pagination: repeated page content detected");
-        break;
-      }
-      prevSignature = pageSignature;
-
-      const uniqueProducts = productsOnPage.filter((product) => {
-        const key = product.productUrl || product.href || product.url;
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
 
       allProducts.push(...uniqueProducts);
-      const newUniqueCount = uniqueProducts.length;
 
-      if (newUniqueCount === 0) {
+      if (uiTotal === null) {
+        uiTotal = await readUiTotal();
+        if (uiTotal) {
+          console.log(`ℹ️ UI total (approx): ${uiTotal}`);
+        }
+      }
+
+      console.log(
+        `📄 Page ${pageNum} extracted=${extraction.products.length} added=${uniqueProducts.length} totalUnique=${allProducts.length} url=${page.url()}`
+      );
+      console.log(
+        `[PA] Page ${pageNum} tile diagnostics: tilesFound=${extraction.tilesFound}`
+      );
+
+      if (uniqueProducts.length < 3) {
         zeroGainStreak += 1;
         if (zeroGainStreak >= 2) {
-          console.log(
-            "🛑 Stop pagination: zero new unique products found on two consecutive pages"
-          );
+          console.log("🛑 Stop pagination: low gain on two consecutive pages");
           break;
         }
       } else {
         zeroGainStreak = 0;
-      }
-
-      console.log(
-        `➡️ Next page ${pageNum + 1 <= MAX_PAGES ? pageNum + 1 : "-"}: via pagination control`
-      );
-
-      if (productsOnPage.length === 0) {
-        console.log(`🛑 Stop pagination: no products on page ${pageNum}`);
-        break;
       }
 
       if (pageNum === MAX_PAGES) {
@@ -694,15 +817,9 @@ async function loadProductsByPagination(
         break;
       }
 
-      const res = await clickConstructorNextAndWait(page);
-      console.log(`[PA] Next result: moved=${res.moved} reason=${res.reason}`);
-
-      if (!res.moved) {
-        console.log(`[PA] Stop pagination: ${res.reason}`);
-        break;
-      }
-
-      await waitForProductsGrid(page);
+      const nextRes = await goToNextPageUI(page);
+      console.log(`[PA] Next result: moved=${nextRes.moved} reason=${nextRes.reason}`);
+      if (!nextRes.moved) break;
     } catch (error) {
       console.error(`⚠️ Failed to process page ${pageNum} for ${store.slug}:`, error);
       debugPaths.push(...(await captureDebug(page, store.slug, `page_${pageNum}_error`)));
@@ -710,6 +827,14 @@ async function loadProductsByPagination(
     }
   }
 
+  if (uiTotal && allProducts.length < uiTotal * 0.8) {
+    const notes = [`uiTotal=${uiTotal}`, `products=${allProducts.length}`];
+    debugPaths.push(...(await saveDebug(page, DEBUG_OUTPUT_DIR, `${store.slug}_final_low_coverage`, notes)));
+  }
+
+  if (usedFacetAvailability) {
+    console.log("usedFacetAvailability=true");
+  }
   console.log(`[PA] ${store.slug} total products across pages=${allProducts.length}`);
   return { products: allProducts, tilesFound: totalTilesFound };
 }
@@ -1126,7 +1251,7 @@ function normalizeProduct(product = {}) {
   const rawImageUrl = product.imageUrl || product.image || null;
   const imageUrl = rawImageUrl
     ? rawImageUrl.startsWith("//")
-      ? `${BASE_URL}${rawImageUrl}`
+      ? `https:${rawImageUrl}`
       : rawImageUrl
     : null;
   const priceRegular = normalizePrice(product.priceRegular ?? product.price);
