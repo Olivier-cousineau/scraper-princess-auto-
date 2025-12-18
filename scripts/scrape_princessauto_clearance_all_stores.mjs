@@ -25,6 +25,23 @@ const PRODUCT_LINK_SELECTORS = [
   "a[href*='/p/']",
 ];
 
+function attachJsonResponseCollector(page) {
+  const collected = [];
+  page.on("response", async (res) => {
+    try {
+      const url = res.url();
+      const ct = (res.headers()["content-type"] || "").toLowerCase();
+
+      if (!ct.includes("application/json")) return;
+      if (!/cnstrc|constructor|algolia|search|browse/i.test(url)) return;
+
+      const json = await res.json();
+      collected.push({ url, json });
+    } catch {}
+  });
+  return collected;
+}
+
 function ensureOutputsRoot() {
   if (!fs.existsSync(OUTPUT_ROOT)) {
     fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
@@ -133,6 +150,33 @@ async function waitForProductsGrid(page) {
         break;
       }
     }
+  }
+}
+
+async function preparePageForExtraction(page) {
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(1200);
+
+  for (let i = 0; i < 6; i++) {
+    await page.mouse.wheel(0, 2200);
+    await page.waitForTimeout(700);
+  }
+
+  const productCandidates = [
+    'a[href*="/product/"]',
+    'a[href*="/produit/"]',
+    'a[href*="/p/"]',
+    "[data-testid*='product'] a",
+    ".product a",
+    ".product-tile a",
+    ".productTile a",
+  ];
+
+  for (const sel of productCandidates) {
+    try {
+      await page.waitForSelector(sel, { timeout: 6000 });
+      break;
+    } catch {}
   }
 }
 
@@ -325,6 +369,8 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   console.log(`Setting store using Locations page => postal=${postal} city=${city}`);
 
+  const jsonResponses = attachJsonResponseCollector(page);
+
   await page.goto("https://www.princessauto.com/en/locations?origin=header", {
     waitUntil: "domcontentloaded",
   });
@@ -394,16 +440,19 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
     await page.goto(SALE_URL, { waitUntil: "domcontentloaded" });
   }
 
+  await page.waitForTimeout(4000);
   await ensureOnSalePage(page);
+  return jsonResponses;
 }
 
 
-async function loadProductsByPagination(page, store, debugPaths = []) {
+async function loadProductsByPagination(page, store, jsonResponses = [], debugPaths = []) {
   const allProducts = [];
   const seen = new Set();
   let prevSignature = null;
   let zeroGainStreak = 0;
   let recoveredFromLocations = false;
+  let firstPageZeroRetry = false;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
@@ -412,20 +461,22 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
-      let productsOnPage = await extractProducts(page);
+      let productsOnPage = await extractProductsWithFallbacks(page, jsonResponses);
       let productCount = productsOnPage.length;
 
       if (
         productsOnPage.length === 0 &&
         pageNum === 1 &&
-        (recovered || recoveredFromLocations || !productVisible)
+        (recovered || recoveredFromLocations || !productVisible) &&
+        !firstPageZeroRetry
       ) {
         console.warn("⚠️ No products on first page after recovery attempt; retrying once...");
+        firstPageZeroRetry = true;
         await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
         await ensureOnSalePage(page);
         await page.waitForLoadState("networkidle").catch(() => {});
         await waitForProductsGrid(page);
-        productsOnPage = await extractProducts(page);
+        productsOnPage = await extractProductsWithFallbacks(page, jsonResponses);
         productCount = productsOnPage.length;
       }
 
@@ -508,6 +559,70 @@ async function loadProductsByPagination(page, store, debugPaths = []) {
 
   console.log(`[PA] ${store.slug} total products across pages=${allProducts.length}`);
   return allProducts;
+}
+
+async function extractProductsDomFallback(page) {
+  const hrefs = await page.$$eval(
+    "a[href]",
+    (as) => as.map((a) => a.getAttribute("href")).filter(Boolean)
+  );
+
+  const productHrefs = [...new Set(hrefs)]
+    .filter((h) => /\/product\/|\/produit\/|\/p\//i.test(h))
+    .slice(0, 400);
+
+  return productHrefs.map((h) => ({
+    href: h.startsWith("http") ? h : `https://www.princessauto.com${h}`,
+  }));
+}
+
+function extractProductsFromNetwork(responses) {
+  const out = [];
+  for (const r of responses) {
+    const j = r.json;
+    const candidates = [
+      j?.response?.results,
+      j?.results,
+      j?.items,
+      j?.products,
+      j?.data?.products,
+    ].filter(Array.isArray);
+
+    for (const arr of candidates) {
+      for (const p of arr) {
+        const url = p?.url || p?.data?.url || p?.product_url || p?.link;
+        const name = p?.name || p?.title;
+        const image = p?.image_url || p?.image || p?.data?.image_url;
+        const price = p?.price || p?.data?.price;
+        if (url || name) out.push({ name, href: url, image, price });
+      }
+    }
+  }
+
+  const seen = new Set();
+  return out.filter((x) => {
+    const key = x.href || x.name;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function extractProductsWithFallbacks(page, jsonResponses = []) {
+  await preparePageForExtraction(page);
+  let products = await extractProducts(page);
+
+  if (!products.length) {
+    console.warn("[PA] Primary extraction returned 0. Trying DOM fallback...");
+    products = await extractProductsDomFallback(page);
+  }
+
+  if (!products.length) {
+    console.warn("[PA] DOM still 0. Trying network JSON fallback...");
+    products = extractProductsFromNetwork(jsonResponses);
+  }
+
+  return products;
 }
 
 async function extractProducts(page) {
@@ -737,10 +852,15 @@ async function processStore(page, store) {
   let storeSynced = true;
 
   try {
-    await setStoreThenGoToSale(page, store, debugPaths);
+    const jsonResponses = await setStoreThenGoToSale(page, store, debugPaths);
     await ensureOnSalePage(page);
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
-    const allProducts = await loadProductsByPagination(page, store, debugPaths);
+    const allProducts = await loadProductsByPagination(
+      page,
+      store,
+      jsonResponses,
+      debugPaths
+    );
     const resultsText = await page
       .locator("text=/Results\s+\d+\s*-\s*\d+\s+of\s+\d+/i")
       .first()
