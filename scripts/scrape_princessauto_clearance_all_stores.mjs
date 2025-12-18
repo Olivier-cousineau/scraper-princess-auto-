@@ -585,17 +585,23 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
 async function extractProductsDomFallback(page) {
   const base = BASE_URL;
 
-  const items = await page.$$eval("a[href]", (as) => {
+  const container = page
+    .locator(
+      'main, [role="main"], section:has-text("Sale"), section:has-text("Vente"), .product-grid, .products, .plp, .search-results'
+    )
+    .first();
+
+  const scope = (await container.count()) ? container : page.locator("body");
+
+  const items = await scope.$$eval("a[href]", (as) => {
     const out = [];
     for (const a of as) {
       const href = a.getAttribute("href") || "";
       if (!/\/product\/|\/p\/|\/produit\/|\/en\/p\/|\/fr\/p\//i.test(href)) continue;
 
-      const name =
-        a.getAttribute("aria-label") ||
-        a.textContent?.trim() ||
-        a.closest("[data-testid*='product'], .product, .product-tile, .productTile")?.textContent?.trim() ||
-        "";
+      if (a.closest("header, footer, nav")) continue;
+
+      const name = a.getAttribute("aria-label") || a.textContent?.trim() || "";
 
       out.push({ href, name });
     }
@@ -607,13 +613,20 @@ async function extractProductsDomFallback(page) {
   for (const it of items) {
     if (!it.href) continue;
     const abs = it.href.startsWith("http") ? it.href : base + it.href;
-    const key = abs;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
     normalized.push({ ...it, href: abs });
+    if (normalized.length >= 50) break;
   }
 
-  return normalized.slice(0, 500);
+  console.log(
+    `[PA] DOM fallback uniqueCount=${normalized.length} sample=${normalized
+      .slice(0, 3)
+      .map((p) => p.href)
+      .join(" | ")}`
+  );
+
+  return normalized;
 }
 
 function extractProductsFromNetwork(responses) {
