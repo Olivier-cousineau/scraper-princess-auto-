@@ -297,6 +297,14 @@ async function setMyStore(page, store) {
     await makeMyStoreButton.click({ timeout: 10000 });
   }
 
+  const overlay = page.locator(
+    "[role='dialog'], .store-selector, .select-store, .modal, .overlay, [class*='modal' i], [class*='overlay' i]"
+  );
+  await overlay
+    .first()
+    .waitFor({ state: "hidden", timeout: 15000 })
+    .catch(() => {});
+
   if (storeLabel) {
     await page
       .waitForFunction(
@@ -316,49 +324,138 @@ async function setMyStore(page, store) {
 
 async function ensureStoreSynced(page, store, debugPaths = [], attempt = 0) {
   const storeLabel = store.storeName || store.name || store.slug || store.city;
+  await waitForStorePersistence(page, store).catch(() => {});
   await page.waitForLoadState("networkidle").catch(() => {});
 
   const indicatorMatches = await page
-    .evaluate((expectedName) => {
-      if (!expectedName) return true;
-      const lower = expectedName.toLowerCase();
-      const candidates = Array.from(
-        document.querySelectorAll(
-          "header, [data-testid='header'], [data-testid*='store' i], [class*='store' i], nav"
-        )
-      );
-      const combinedText = candidates
-        .map((el) => el.textContent || "")
-        .join(" \n ")
-        .toLowerCase();
-      return combinedText.includes(lower);
-    }, storeLabel)
+    .evaluate(
+      (expectedName, cityName) => {
+        const normalize = (text) =>
+          (text || "")
+            .normalize("NFD")
+            .replace(/\p{Diacritic}/gu, "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim();
+
+        const normalizedExpected = normalize(expectedName);
+        const normalizedCity = normalize(cityName);
+
+        if (!normalizedExpected && !normalizedCity) return true;
+
+        const candidates = Array.from(
+          document.querySelectorAll(
+            "header, [data-testid='header'], [data-testid*='store' i], [class*='store' i], nav"
+          )
+        );
+        const combinedText = normalize(
+          candidates
+            .map((el) => el.textContent || "")
+            .join(" \n ")
+        );
+
+        return (
+          (normalizedExpected && combinedText.includes(normalizedExpected)) ||
+          (normalizedCity && combinedText.includes(normalizedCity))
+        );
+      },
+      storeLabel,
+      store.city
+    )
     .catch(() => false);
 
   const myStoreMatches = await page
-    .evaluate((expectedName) => {
-      if (!expectedName) return true;
-      const lower = expectedName.toLowerCase();
-      const myStoreCandidate = Array.from(
-        document.querySelectorAll(
-          "header *, [data-testid='header'] *, [data-testid*='store' i], [class*='store' i]"
-        )
-      ).find((el) => /my store/i.test(el.textContent || ""));
-      const labelText = (myStoreCandidate?.textContent || "").toLowerCase();
-      return labelText.includes(lower);
-    }, storeLabel)
+    .evaluate(
+      (expectedName, cityName) => {
+        const normalize = (text) =>
+          (text || "")
+            .normalize("NFD")
+            .replace(/\p{Diacritic}/gu, "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim();
+
+        const normalizedExpected = normalize(expectedName);
+        const normalizedCity = normalize(cityName);
+        if (!normalizedExpected && !normalizedCity) return true;
+
+        const myStoreCandidate = Array.from(
+          document.querySelectorAll(
+            "header *, [data-testid='header'] *, [data-testid*='store' i], [class*='store' i]"
+          )
+        ).find((el) => /my store/i.test(el.textContent || ""));
+        const labelText = normalize(myStoreCandidate?.textContent || "");
+        return (
+          (normalizedExpected && labelText.includes(normalizedExpected)) ||
+          (normalizedCity && labelText.includes(normalizedCity))
+        );
+      },
+      storeLabel,
+      store.city
+    )
     .catch(() => false);
 
   if (indicatorMatches && myStoreMatches) return true;
 
   if (attempt >= 1) {
     debugPaths.push(...(await captureDebug(page, store.slug, "store_sync_failed")));
-    throw new Error(`Store indicator mismatch after retry for ${store.slug}`);
+    console.warn(`⚠️ Store indicator mismatch persisted for ${store.slug}. Continuing with storeSynced=false.`);
+    return false;
   }
 
   console.warn(`⚠️ Store indicator did not match after selection for ${store.slug}. Retrying...`);
   await setMyStore(page, store);
   return ensureStoreSynced(page, store, debugPaths, attempt + 1);
+}
+
+async function waitForStorePersistence(page, store) {
+  const storeLabel = store.storeName || store.name || store.slug || store.city || "";
+  const normalizedExpected = normalizeText(storeLabel);
+  const normalizedCity = normalizeText(store.city || "");
+
+  if (!normalizedExpected && !normalizedCity) return;
+
+  await page
+    .waitForFunction(
+      ({ expected, city }) => {
+        const normalize = (text) =>
+          (text || "")
+            .normalize("NFD")
+            .replace(/\p{Diacritic}/gu, "")
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            .trim();
+
+        const haystacks = [];
+
+        try {
+          haystacks.push(normalize(document.cookie || ""));
+        } catch (error) {}
+
+        try {
+          const storageValues = [
+            ...Object.values(localStorage || {}),
+            ...Object.values(sessionStorage || {}),
+          ];
+          haystacks.push(normalize(storageValues.join("|")));
+        } catch (error) {}
+
+        const matchers = [expected, city].filter(Boolean);
+        return matchers.some((needle) => haystacks.some((h) => h.includes(needle)));
+      },
+      { expected: normalizedExpected, city: normalizedCity },
+      { timeout: 15000 }
+    )
+    .catch(() => {});
+}
+
+function normalizeText(text) {
+  return (text || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 
@@ -558,7 +655,7 @@ async function extractProducts(page) {
   return products;
 }
 
-function writeStoreOutput(store, products) {
+function writeStoreOutput(store, products, storeSynced = true) {
   const slug = store.slug;
   const storeDir = path.join(OUTPUT_ROOT, slug);
   const outputFile = path.join(storeDir, "data.json");
@@ -597,6 +694,7 @@ function writeStoreOutput(store, products) {
     phone: store.phone ?? null,
     slug: store.slug,
     updatedAt: new Date().toISOString(),
+    storeSynced,
     products,
   };
 
@@ -675,13 +773,16 @@ function updateIndex(indexEntries) {
 
 async function processStore(page, store) {
   const debugPaths = [];
+  let storeSynced = true;
 
   try {
     await navigateToSale(page);
     await setMyStore(page, store);
-    await ensureStoreSynced(page, store, debugPaths);
+    const firstSync = await ensureStoreSynced(page, store, debugPaths);
+    storeSynced = storeSynced && firstSync !== false;
     await navigateToSale(page);
-    await ensureStoreSynced(page, store, debugPaths);
+    const secondSync = await ensureStoreSynced(page, store, debugPaths);
+    storeSynced = storeSynced && secondSync !== false;
     debugPaths.push(...(await captureDebug(page, store.slug, "after_store")));
     const allProducts = await loadProductsByPagination(page, store, debugPaths);
     const resultsText = await page
@@ -711,17 +812,30 @@ async function processStore(page, store) {
       .catch(() => false);
 
     const isZeroLegit = hasNoResultsText || totalResultCount === 0;
-    if (allProductsWithStore.length === 0) {
-      const reason = isZeroLegit
-        ? "Page reports zero results"
-        : "Page indicates results but extraction returned 0";
-      console.warn(`⚠️ No products extracted for ${store.slug}. ${reason}. Keeping debug.`);
+    if (!storeSynced) {
+      console.warn(
+        `⚠️ Store sync validation could not be confirmed for ${store.slug}. Proceeding with storeSynced=false.`
+      );
+    }
+
+    const shouldKeepDebug = allProductsWithStore.length === 0 || !storeSynced;
+
+    if (shouldKeepDebug) {
+      const reason =
+        allProductsWithStore.length === 0
+          ? isZeroLegit
+            ? "Page reports zero results"
+            : "Page indicates results but extraction returned 0"
+          : !storeSynced
+            ? "Store sync unresolved"
+            : "Potential mismatch between page and extraction";
+      console.warn(`⚠️ Keeping debug for ${store.slug}. ${reason}.`);
       await uploadDebugArtifactsIfAvailable(debugPaths);
     } else {
       deleteDebugArtifacts(debugPaths);
     }
 
-    return writeStoreOutput(store, allProductsWithStore);
+    return writeStoreOutput(store, allProductsWithStore, storeSynced);
   } catch (error) {
     console.error(`⚠️ Store failed (${store.slug}):`, error);
     debugPaths.push(...(await captureDebug(page, store.slug, "store_failed")));
