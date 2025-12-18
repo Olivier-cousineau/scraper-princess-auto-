@@ -175,48 +175,47 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
         .map((selector) => tile.querySelector(selector))
         .find(Boolean);
       const rawHref = link?.getAttribute("href") || link?.href || null;
-      const itemId =
-        tile.getAttribute("data-oe-item-id") ||
-        tile.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
-        null;
+      const itemId = tile.getAttribute("data-oe-item-id");
       const productUrl = normalizeUrl(rawHref) || buildUrlFromItemId(itemId);
 
-      const skuMatch = tile.innerText.match(/\b(?:SKU|UGS)\s*[:#]?\s*([0-9]{5,9})\b/i);
-      const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
-      const sku =
-        extractSkuFromHref(rawHref) || skuMatch?.[1] || skuFromItemId || itemId || null;
+      let sku = null;
+      if (itemId) {
+        sku = itemId.replace(/^PA0+/, "");
+        if (!sku) sku = itemId;
+      }
+      if (!sku) sku = itemId;
 
       const uniqueKey = sku || productUrl || itemId || rawHref;
       const name =
         tile.getAttribute("data-oe-item-name") ||
-        tile.querySelector("[data-oe-item-name]")?.getAttribute("data-oe-item-name") ||
-        tile.querySelector("[aria-label]")?.getAttribute("aria-label") ||
-        tile.querySelector("h2,h3")?.textContent?.trim() ||
-        tile.textContent?.trim() ||
-        "";
+        tile.querySelector("img")?.getAttribute("alt") ||
+        null;
 
       const img = tile.querySelector("img");
-      const imageUrl = pickImageUrl(img);
+      const imageUrl =
+        img?.getAttribute("src") || img?.getAttribute("data-src") || null;
 
-      let priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
-      let priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
+      const parsedRegular = parseFloat(
+        tile.getAttribute("data-oe-item-list-price") || ""
+      );
+      const priceRegular = Number.isNaN(parsedRegular) ? null : parsedRegular;
 
-      if (!priceRegularText) {
-        const dataRegular = parseFloat(tile.getAttribute("data-oe-item-list-price"));
-        if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
-      }
-
-      if (!priceSaleText) {
-        const dataSale = parseFloat(tile.getAttribute("data-oe-item-sale-price"));
-        if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
-      }
+      const parsedSale = parseFloat(
+        tile.getAttribute("data-oe-item-sale-price") || ""
+      );
+      const priceSale = Number.isNaN(parsedSale) ? null : parsedSale;
 
       const missingHref = !rawHref && !itemId;
       const missingTitle = !name;
-      const missingSalePrice = !priceSaleText?.toString().trim();
+      const missingSalePrice = priceSale === null;
       const missingSku = !sku;
 
-      const rejected = !productUrl || !uniqueKey || seen.has(uniqueKey);
+      const rejected =
+        name === null ||
+        priceSale === null ||
+        !productUrl ||
+        !uniqueKey ||
+        seen.has(uniqueKey);
 
       if (rejected && captureRejects) {
         if (missingHref) rejectionStats.missingHref += 1;
@@ -237,8 +236,8 @@ async function extractProductsFromSalePage(page, { captureRejects = false } = {}
         name,
         imageUrl,
         sku,
-        priceRegular: priceRegularText,
-        priceSale: priceSaleText,
+        priceRegular,
+        priceSale,
       });
 
       seen.add(uniqueKey);
@@ -1201,47 +1200,40 @@ async function extractProducts(page, pageNum = 1) {
           "a[href*='/product/']:not([href*='ratings=reviews'])"
         );
         const href = productLink?.getAttribute("href") || productLink?.href || null;
-        const itemId =
-          card.getAttribute("data-oe-item-id") ||
-          card.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
-          null;
+        const itemId = card.getAttribute("data-oe-item-id");
         const productUrl = normalizeUrl(href) || buildUrlFromItemId(itemId);
         if (productUrl) tileStats.tileWithUrlCount += 1;
 
         const name =
-          card.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
           card.getAttribute("data-oe-item-name") ||
-          productLink?.textContent?.trim() ||
+          card.querySelector("img")?.getAttribute("alt") ||
           null;
 
         const imgEl =
           card.querySelector("img[src]") || card.querySelector("[data-bind*='primarySmallImageURL']");
         const imageUrl =
-          imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
+          imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
-        const skuMatch = card.innerText.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-        const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
-        const sku = extractSkuFromHref(href) || skuMatch?.[1] || skuFromItemId || itemId || null;
+        let sku = null;
+        if (itemId) {
+          sku = itemId.replace(/^PA0+/, "");
+          if (!sku) sku = itemId;
+        }
+        if (!sku) sku = itemId;
         if (sku) tileStats.tileWithSkuCount += 1;
 
-        let priceRegularText =
-          card.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
-        let priceSaleText =
-          card.querySelector(".cc-product-after-price")?.textContent?.trim() ||
-          card.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
-          null;
+        const parsedRegular = parseFloat(
+          card.getAttribute("data-oe-item-list-price") || ""
+        );
+        const priceRegular = Number.isNaN(parsedRegular) ? null : parsedRegular;
 
-        if (!priceRegularText) {
-          const dataRegular = parseFloat(card.getAttribute("data-oe-item-list-price"));
-          if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
-        }
+        const parsedSale = parseFloat(
+          card.getAttribute("data-oe-item-sale-price") || ""
+        );
+        const priceSale = Number.isNaN(parsedSale) ? null : parsedSale;
 
-        if (!priceSaleText) {
-          const dataSale = parseFloat(card.getAttribute("data-oe-item-sale-price"));
-          if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
-        }
-
-        if (priceRegularText || priceSaleText) tileStats.tileWithPricesCount += 1;
+        if (priceRegular !== null || priceSale !== null)
+          tileStats.tileWithPricesCount += 1;
 
         if (!debugSample && shouldSample) {
           const inner = card.innerHTML || "";
@@ -1250,22 +1242,29 @@ async function extractProducts(page, pageNum = 1) {
             sampleFoundHref: productUrl || href,
             sampleFoundName: name,
             sampleFoundImg: imageUrl,
-            sampleFoundSkuText: skuMatch?.[0] || null,
-            sampleFoundBeforePrice: priceRegularText,
-            sampleFoundAfterPrice: priceSaleText,
+            sampleFoundSkuText: sku,
+            sampleFoundBeforePrice: priceRegular,
+            sampleFoundAfterPrice: priceSale,
           };
         }
 
         const uniqueKey = sku || productUrl || itemId || href;
-        if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
+        if (
+          name === null ||
+          priceSale === null ||
+          !productUrl ||
+          !uniqueKey ||
+          seen.has(uniqueKey)
+        )
+          continue;
 
         products.push({
           name,
           imageUrl,
           productUrl,
           sku,
-          priceRegular: priceRegularText,
-          priceSale: priceSaleText,
+          priceRegular,
+          priceSale,
         });
 
         seen.add(uniqueKey);
@@ -1336,55 +1335,52 @@ async function extractProductsFromAnchors(page) {
 
       const card =
         anchor.closest(".cc-product-card, .cc-product, li, .grid-item, [data-id]") || anchor;
-      const itemId =
-        card?.getAttribute("data-oe-item-id") ||
-        card?.querySelector("[data-oe-item-id]")?.getAttribute("data-oe-item-id") ||
-        null;
+      const itemId = card?.getAttribute("data-oe-item-id") || null;
       const name =
-        card?.querySelector("span[id^='CC-product-displayName-']")?.textContent?.trim() ||
         card?.getAttribute("data-oe-item-name") ||
-        anchor.textContent?.trim() ||
+        card?.querySelector("img")?.getAttribute("alt") ||
         null;
 
       const imgEl =
         card?.querySelector("img[src]") || card?.querySelector("[data-bind*='primarySmallImageURL']") ||
         null;
       const imageUrl =
-        imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || imgEl?.textContent || null;
+        imgEl?.getAttribute("src") || imgEl?.getAttribute("data-src") || null;
 
-      let priceRegularText =
-        card?.querySelector(".cc-product-before-price")?.textContent?.trim() || null;
-      let priceSaleText =
-        card?.querySelector(".cc-product-after-price")?.textContent?.trim() ||
-        card?.querySelector("[id^='CC-product-sale-price-']")?.textContent?.trim() ||
-        null;
+      const parsedRegular = parseFloat(
+        card?.getAttribute("data-oe-item-list-price") || ""
+      );
+      const priceRegular = Number.isNaN(parsedRegular) ? null : parsedRegular;
 
-      if (!priceRegularText) {
-        const dataRegular = parseFloat(card?.getAttribute("data-oe-item-list-price"));
-        if (!Number.isNaN(dataRegular)) priceRegularText = dataRegular;
+      const parsedSale = parseFloat(card?.getAttribute("data-oe-item-sale-price") || "");
+      const priceSale = Number.isNaN(parsedSale) ? null : parsedSale;
+
+      if (priceRegular !== null || priceSale !== null) tileWithPricesCount += 1;
+
+      let sku = null;
+      if (itemId) {
+        sku = itemId.replace(/^PA0+/, "");
+        if (!sku) sku = itemId;
       }
-
-      if (!priceSaleText) {
-        const dataSale = parseFloat(card?.getAttribute("data-oe-item-sale-price"));
-        if (!Number.isNaN(dataSale)) priceSaleText = dataSale;
-      }
-
-      if (priceRegularText || priceSaleText) tileWithPricesCount += 1;
-
-      const skuMatch = card?.innerText?.match(/(?:UGS|SKU)\s*:\s*(\d+)/i);
-      const skuFromItemId = itemId ? itemId.replace(/^PA0+/, "") || itemId : null;
-      const sku = extractSkuFromHref(href) || skuMatch?.[1] || skuFromItemId || itemId || null;
+      if (!sku) sku = itemId;
       if (sku) tileWithSkuCount += 1;
 
       const uniqueKey = sku || productUrl || itemId || href;
-      if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
+      if (
+        name === null ||
+        priceSale === null ||
+        !productUrl ||
+        !uniqueKey ||
+        seen.has(uniqueKey)
+      )
+        continue;
 
       products.push({
         productUrl,
         name,
         imageUrl,
-        priceRegular: priceRegularText,
-        priceSale: priceSaleText,
+        priceRegular,
+        priceSale,
         sku,
       });
 
@@ -1420,21 +1416,20 @@ function normalizeProduct(product = {}) {
   const productUrl = normalizeHref(
     product.productUrl || product.href || product.url || product.link
   );
-  const name = (product.name || product.title || "").trim();
+  const rawName = product.name ?? null;
+  const name = typeof rawName === "string" && rawName.trim() ? rawName.trim() : null;
   const rawImageUrl = product.imageUrl || product.image || null;
   const imageUrl = rawImageUrl
     ? rawImageUrl.startsWith("//")
       ? `https:${rawImageUrl}`
       : rawImageUrl
     : null;
-  const priceRegular = normalizePrice(product.priceRegular ?? product.price);
-  const priceSale = normalizePrice(product.priceSale ?? product.price);
-  const productIdFromUrl = extractSkuFromUrl(
-    product.productUrl || product.href || product.url || product.link
-  );
-  const sku = product.sku ?? productIdFromUrl ?? null;
+  const priceRegular = normalizePrice(product.priceRegular);
+  const priceSale = normalizePrice(product.priceSale);
+  const sku = product.sku ?? null;
 
   if (!productUrl) return null;
+  if (name === null) return null;
   if (priceSale === null) return null;
 
   return {
