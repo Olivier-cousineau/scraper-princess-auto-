@@ -55,6 +55,55 @@ jobs:
             echo "No changes to commit"
           fi
 
+      - name: Publish Princess Auto cities + deals to econoplus
+        if: always()
+        env:
+          ECONOPLUS_PAT: ${{ secrets.ECONOPLUS_PAT }}
+          ECONOPLUS_REPO: ${{ secrets.ECONOPLUS_REPO }}
+        run: |
+          set -e
+
+          rm -rf _econoplus
+          git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/${ECONOPLUS_REPO}.git _econoplus
+
+          mkdir -p _econoplus/public/princessauto
+
+          # 1) Villes (magasins)
+          cp -f public/princessauto/stores.json _econoplus/public/princessauto/stores.json
+
+          # 2) Liquidations par ville
+          published="[]"
+          if [ -d "outputs/princessauto" ]; then
+            for d in outputs/princessauto/*; do
+              if [ -d "$d" ] && [ -f "$d/data.json" ]; then
+                slug=$(basename "$d")
+                mkdir -p "_econoplus/public/princessauto/${slug}"
+                cp -f "$d/data.json" "_econoplus/public/princessauto/${slug}/data.json"
+                if [ -f "$d/data.csv" ]; then
+                  cp -f "$d/data.csv" "_econoplus/public/princessauto/${slug}/data.csv"
+                fi
+                # append slug to published list
+                published=$(node -e "const a=${published}; a.push('${slug}'); console.log(JSON.stringify(a));")
+              fi
+            done
+          fi
+
+          # 3) Index (optionnel mais recommandé)
+          node -e "const fs=require('fs'); const path='_econoplus/public/princessauto/index.json'; fs.writeFileSync(path, JSON.stringify({updatedAt: new Date().toISOString(), storesPublished: ${published}}, null, 2));"
+
+          cd _econoplus
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/princessauto
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Princess Auto: publish cities + deals"
+          git push
+
       - name: Upload artifacts (debug + outputs)
         if: always()
         uses: actions/upload-artifact@v4
