@@ -210,6 +210,36 @@ async function waitForGridChange(page, previousHref, previousCount) {
   return contentChangeDetected;
 }
 
+async function dismissMakeStoreModal(page) {
+  const modal = page.locator("#makeStoreModal");
+  if (!(await modal.count())) return;
+
+  try {
+    await modal.waitFor({ state: "visible", timeout: 1500 });
+  } catch {
+    return;
+  }
+
+  const ok = modal.getByRole("button", { name: /^ok$/i });
+  if (await ok.count()) {
+    await ok.click({ timeout: 5000 }).catch(() => {});
+  } else {
+    const closeBtn = modal
+      .locator(
+        "button.close, .modal-header button, [aria-label='Close'], [aria-label='Fermer']"
+      )
+      .first();
+
+    if (await closeBtn.count()) {
+      await closeBtn.click({ timeout: 5000 }).catch(() => {});
+    } else {
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+  }
+
+  await modal.waitFor({ state: "hidden", timeout: 8000 }).catch(() => {});
+}
+
 async function clickNextAndWaitForChange(page, previousHref, previousCount) {
   const nextBtn = page
     .locator(
@@ -373,6 +403,8 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
     throw new Error("Could not find store search input");
   }
 
+  await dismissMakeStoreModal(page);
+  await page.waitForTimeout(200);
   await searchInput.click();
   await searchInput.fill(cityOrPostal);
 
@@ -391,6 +423,8 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   if (!makeMyStoreReady) {
     console.warn("⚠️ Make My Store button not visible after first attempt; retrying search");
+    await dismissMakeStoreModal(page);
+    await page.waitForTimeout(200);
     await searchInput.click();
     await searchInput.fill("");
     await searchInput.type(cityOrPostal, { delay: 30 }).catch(() => {});
@@ -417,11 +451,8 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
   await makeMyStoreButton.click({ timeout: 20000 });
   debugPaths.push(...(await captureDebug(page, store.slug, "after_make_my_store")));
 
-  const okButton = page.getByRole("button", { name: /^ok$/i }).first();
-  await okButton.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
-  if (await okButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await okButton.click({ timeout: 10000 }).catch(() => {});
-  }
+  await dismissMakeStoreModal(page);
+  await page.waitForTimeout(200);
   debugPaths.push(...(await captureDebug(page, store.slug, "after_ok")));
 
   const saleLink = page.getByRole("link", { name: /vente|sale/i }).first();
