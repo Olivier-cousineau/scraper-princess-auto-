@@ -7,9 +7,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const BASE_URL = "https://www.princessauto.com";
-
-const SALE_URL = "https://www.princessauto.com/en/category/Sale";
+const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
+const SALE_URL = withInStoreFacet(SALE_BASE_URL);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "100", 10);
 const CONCURRENCY = Number(process.env.PA_CONCURRENCY ?? "1");
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
@@ -25,6 +25,13 @@ const PRODUCT_LINK_SELECTORS = [
   "a[href*='/product/']",
   "a[href*='/p/']",
 ];
+
+function withInStoreFacet(url) {
+  const u = new URL(url);
+  u.searchParams.set("Nrpp", String(NRPP));
+  u.searchParams.set("facet.availability", "56");
+  return u.toString();
+}
 
 function attachJsonResponseCollector(page) {
   const collected = [];
@@ -360,6 +367,25 @@ async function ensureOnSalePage(page) {
   return { recovered, productVisible };
 }
 
+async function ensureSaleFacetAndNrpp(page) {
+  const currentUrl = page.url().split("#")[0];
+  if (!/\/category\/sale/i.test(currentUrl)) {
+    return { applied: false, url: currentUrl };
+  }
+
+  const targetUrl = withInStoreFacet(currentUrl);
+  if (targetUrl === currentUrl) {
+    return { applied: false, url: currentUrl };
+  }
+
+  console.log(
+    `ℹ️ Applying in-store facet and Nrpp to Sale URL: ${targetUrl}`
+  );
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  return { applied: true, url: targetUrl };
+}
+
 async function setStoreThenGoToSale(page, store, debugPaths = []) {
   const postal = normalizePostal(store.postalCode || store.postal || store.zip);
   const city = store.city || "";
@@ -439,6 +465,7 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
 
   await page.waitForTimeout(4000);
   await ensureOnSalePage(page);
+  await ensureSaleFacetAndNrpp(page);
   return jsonResponses;
 }
 
@@ -453,8 +480,16 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
-      const { recovered, productVisible } = await ensureOnSalePage(page);
+      let { recovered, productVisible } = await ensureOnSalePage(page);
       recoveredFromLocations = recoveredFromLocations || recovered;
+      const facetApplied = await ensureSaleFacetAndNrpp(page);
+
+      if (facetApplied.applied) {
+        const postFacet = await ensureOnSalePage(page);
+        recovered = recovered || postFacet.recovered;
+        productVisible = postFacet.productVisible;
+        recoveredFromLocations = recoveredFromLocations || postFacet.recovered;
+      }
       await page.waitForLoadState("networkidle").catch(() => {});
       await waitForProductsGrid(page);
 
