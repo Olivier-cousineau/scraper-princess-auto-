@@ -244,65 +244,67 @@ async function dismissMakeStoreModal(page) {
   await modal.waitFor({ state: "hidden", timeout: 8000 }).catch(() => {});
 }
 
-async function clickConstructorNext(page) {
+async function clickConstructorNextAndWait(page) {
   const listSel = "#cio-results-list, .cio-search-result-list, .cio-search-result-list-container";
   const itemSel = `${listSel} a.cio-search-result[href]`;
 
-  const firstHref = async () => await page.locator(itemSel).first().getAttribute("href");
-  const beforeFirst = await firstHref();
-  const beforeCount = await page.locator(itemSel).count();
-
-  const activePageLocator = page
-    .locator(
-      "li[aria-current='page'], button[aria-current='page'], a[aria-current='page'], .cc-pagination-button.cc-active, .cc-pagination-button.cc-current"
-    )
-    .first();
-  const activePageValue = async () => {
-    if (!(await activePageLocator.count())) return null;
-    const aria = await activePageLocator.getAttribute("aria-label");
-    if (aria) return aria;
-    const text = await activePageLocator.textContent();
-    if (text) return text.trim();
-    return await activePageLocator.getAttribute("class");
+  const getHrefHash = async () => {
+    const hrefs = await page.locator(itemSel).evaluateAll((els) =>
+      els.map((a) => a.getAttribute("href") || "").filter(Boolean)
+    );
+    return hrefs.slice(0, 50).join("|");
   };
-  const beforeActive = await activePageValue();
 
-  const nextA = page.locator("li.cio-search-page-next a[aria-label*='next']").first();
-  const nextSpan = page.locator("span.cc-pagination-button.cc-next").first();
+  const getActivePage = async () => {
+    const el = page
+      .locator("li.cio-search-page-selected, li.cio-search-page-active, li[aria-current='page']")
+      .first();
+    if (!(await el.count())) return "";
+    return (await el.textContent())?.trim() || "";
+  };
+
+  const beforeHash = await getHrefHash();
+  const beforeActive = await getActivePage();
 
   const nextLi = page.locator("li.cio-search-page-next").first();
-  const liClass = (await nextLi.getAttribute("class")) || "";
-  if (/disabled/i.test(liClass)) return { moved: false, reason: "next_disabled" };
+  const cls = (await nextLi.getAttribute("class")) || "";
+  if (/disabled/i.test(cls)) return { moved: false, reason: "next_disabled" };
 
-  if (await nextA.count()) {
-    await nextA.scrollIntoViewIfNeeded().catch(() => {});
-    await nextA.click({ timeout: 10000 }).catch(async () => {
-      await page.evaluate((el) => el.click(), await nextA.elementHandle());
-    });
-  } else if (await nextSpan.count()) {
-    await nextSpan.scrollIntoViewIfNeeded().catch(() => {});
-    await nextSpan.click({ timeout: 10000 }).catch(async () => {
-      await page.evaluate((el) => el.click(), await nextSpan.elementHandle());
-    });
-  } else {
-    return { moved: false, reason: "next_not_found" };
-  }
+  const nextA = page.locator("li.cio-search-page-next a[aria-label*='next']").first();
+  if (!(await nextA.count())) return { moved: false, reason: "next_not_found" };
 
-  let moved = false;
-  for (let i = 0; i < 20; i++) {
+  const waitNetwork = page
+    .waitForResponse(
+      (res) => {
+        const url = res.url();
+        return /cnstrc|constructor/i.test(url) && res.status() === 200;
+      },
+      { timeout: 12000 }
+    )
+    .catch(() => null);
+
+  await nextA.scrollIntoViewIfNeeded().catch(() => {});
+  await nextA.click({ timeout: 10000 });
+
+  const net = await waitNetwork;
+
+  for (let i = 0; i < 24; i++) {
     await page.waitForTimeout(500);
-    const afterFirst = await firstHref();
-    const afterCount = await page.locator(itemSel).count();
-    const afterActive = await activePageValue();
 
-    if ((afterFirst && afterFirst !== beforeFirst) || afterActive !== beforeActive) {
-      moved = true;
-      console.log(`[PA] Next OK: firstHref changed, count=${beforeCount}->${afterCount}`);
-      break;
+    const afterActive = await getActivePage();
+    if (afterActive && afterActive !== beforeActive) {
+      return { moved: true, reason: "active_page_changed", network: !!net };
+    }
+
+    const afterHash = await getHrefHash();
+    if (afterHash && afterHash !== beforeHash) {
+      return { moved: true, reason: "href_hash_changed", network: !!net };
     }
   }
 
-  return { moved, reason: moved ? "ok" : "no_change" };
+  if (net) return { moved: true, reason: "network_ok_but_same_hash" };
+
+  return { moved: false, reason: "no_change" };
 }
 
 async function navigateToSale(page) {
@@ -543,10 +545,11 @@ async function loadProductsByPagination(page, store, jsonResponses = [], debugPa
         break;
       }
 
-      const { moved, reason } = await clickConstructorNext(page);
+      const res = await clickConstructorNextAndWait(page);
+      console.log(`[PA] Next result: moved=${res.moved} reason=${res.reason}`);
 
-      if (!moved) {
-        console.log(`[PA] Stop pagination: ${reason}`);
+      if (!res.moved) {
+        console.log(`[PA] Stop pagination: ${res.reason}`);
         break;
       }
 
