@@ -266,6 +266,34 @@ function getCityLabelForButton(store) {
   return label.toUpperCase();
 }
 
+async function submitStoreSearch(page) {
+  const btn = page.locator("button[data-testid='cio-submit-btn']").first();
+
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+
+  if (await btn.count()) {
+    try {
+      const handle = await btn.elementHandle();
+      if (handle) {
+        await page.waitForFunction((el) => el && !el.disabled, handle, { timeout: 5000 });
+        await btn.click();
+        await page.waitForTimeout(400);
+        return;
+      }
+    } catch {}
+  }
+
+  const firstResultCard = page.locator("text=/abbotsford|kamloops/i").first();
+  if (await firstResultCard.count()) {
+    await firstResultCard.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
+  }
+
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+}
+
 async function ensureOnSalePage(page) {
   let recovered = false;
   if (page.url().includes("/locations")) {
@@ -333,23 +361,59 @@ async function setStoreThenGoToSale(page, store, debugPaths = []) {
     page.locator("input[type='search'], input[placeholder*='postal' i], input[placeholder*='city' i]").first(),
   ];
 
+  let searchInput = null;
   for (const input of searchInputCandidates) {
     if (await input.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await input.fill(cityOrPostal);
+      searchInput = input;
       break;
     }
   }
 
-  const searchButton = page.getByRole("button", { name: /rechercher|search/i }).first();
-  if (await searchButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await searchButton.click({ timeout: 10000 });
+  if (!searchInput) {
+    throw new Error("Could not find store search input");
   }
+
+  await searchInput.click();
+  await searchInput.fill(cityOrPostal);
+
+  await submitStoreSearch(page);
 
   const makeMyStoreRegex = new RegExp(
     `faire\\s+de\\s+${escapeRegex(cityLabelForButton)}\\s+mon\\s+magasin`,
     "i"
   );
   const makeMyStoreButton = page.getByRole("button", { name: makeMyStoreRegex }).first();
+
+  let makeMyStoreReady = await makeMyStoreButton
+    .waitFor({ state: "visible", timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!makeMyStoreReady) {
+    console.warn("⚠️ Make My Store button not visible after first attempt; retrying search");
+    await searchInput.click();
+    await searchInput.fill("");
+    await searchInput.type(cityOrPostal, { delay: 30 }).catch(() => {});
+    await submitStoreSearch(page);
+    makeMyStoreReady = await makeMyStoreButton
+      .waitFor({ state: "visible", timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  if (!makeMyStoreReady) {
+    const submitButton = page.locator("button[data-testid='cio-submit-btn']").first();
+    let disabledState = "not-found";
+    if (await submitButton.count()) {
+      disabledState = await submitButton.evaluate((el) => el.disabled).catch(() => "evaluation-failed");
+    }
+    console.warn(
+      `⚠️ Make My Store button not resolved for ${cityLabelForButton}; submit disabled state: ${disabledState}`
+    );
+    debugPaths.push(...(await captureDebug(page, store.slug, "store_search_not_resolved")));
+    throw new Error(`Make My Store button not available for ${cityLabelForButton}`);
+  }
+
   await makeMyStoreButton.click({ timeout: 20000 });
   debugPaths.push(...(await captureDebug(page, store.slug, "after_make_my_store")));
 
