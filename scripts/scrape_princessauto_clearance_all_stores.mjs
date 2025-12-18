@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const BASE_URL = "https://www.princessauto.com";
-const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale";
+const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale?page=1";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
 const SALE_URL = withNrpp(SALE_BASE_URL);
 const MAX_PAGES = parseInt(process.env.MAX_PAGES || "40", 10);
@@ -109,11 +109,18 @@ async function waitForDomStable(page, { timeoutMs = 12000 } = {}) {
   );
 }
 
-async function extractProductsFromSalePage(page) {
-  return page.evaluate(({ tileSelector, linkSelectors }) => {
+async function extractProductsFromSalePage(page, { captureRejects = false } = {}) {
+  return page.evaluate(({ tileSelector, linkSelectors, captureRejects }) => {
     const tiles = Array.from(document.querySelectorAll(tileSelector));
     const seen = new Set();
     const products = [];
+    const rejectionStats = {
+      missingHref: 0,
+      missingTitle: 0,
+      missingSalePrice: 0,
+      missingSku: 0,
+    };
+    const rejectedSamples = [];
 
     const normalizeUrl = (href) => {
       if (!href || /ratings=reviews/i.test(href)) return null;
@@ -169,8 +176,6 @@ async function extractProductsFromSalePage(page) {
       const sku = extractSkuFromHref(rawHref) || skuMatch?.[1] || null;
 
       const uniqueKey = sku || productUrl || rawHref;
-      if (!productUrl || !uniqueKey || seen.has(uniqueKey)) continue;
-
       const name =
         tile.getAttribute("data-oe-item-name") ||
         tile.querySelector("[data-oe-item-name]")?.getAttribute("data-oe-item-name") ||
@@ -185,6 +190,27 @@ async function extractProductsFromSalePage(page) {
       const priceRegularText = tile.querySelector(".cc-product-before-price")?.textContent || "";
       const priceSaleText = tile.querySelector(".cc-product-after-price")?.textContent || "";
 
+      const missingHref = !rawHref || !productUrl;
+      const missingTitle = !name;
+      const missingSalePrice = !priceSaleText?.trim();
+      const missingSku = !sku;
+
+      const rejected = !productUrl || !uniqueKey || seen.has(uniqueKey);
+
+      if (rejected && captureRejects) {
+        if (missingHref) rejectionStats.missingHref += 1;
+        if (missingTitle) rejectionStats.missingTitle += 1;
+        if (missingSalePrice) rejectionStats.missingSalePrice += 1;
+        if (missingSku) rejectionStats.missingSku += 1;
+
+        if (rejectedSamples.length < 3) {
+          const outer = tile.outerHTML || "";
+          rejectedSamples.push(outer.slice(0, 1200));
+        }
+      }
+
+      if (rejected) continue;
+
       products.push({
         productUrl,
         name,
@@ -197,8 +223,8 @@ async function extractProductsFromSalePage(page) {
       seen.add(uniqueKey);
     }
 
-    return { products, tilesFound: tiles.length };
-  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS });
+    return { products, tilesFound: tiles.length, rejectionStats, rejectedSamples };
+  }, { tileSelector: PRODUCT_TILE_SELECTOR, linkSelectors: PRODUCT_LINK_SELECTORS, captureRejects });
 }
 
 async function goToNextPageUI(page) {
@@ -409,7 +435,20 @@ async function waitForProductsGrid(page) {
 
 async function waitForSaleHydration(page) {
   await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1200);
+
+  await page
+    .waitForFunction(() => {
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+      const productAnchors = anchors.filter(
+        (a) =>
+          a.getAttribute("href") &&
+          a.getAttribute("href").includes("/product/") &&
+          a.getAttribute("href").length > "/product/".length
+      );
+      return productAnchors.length >= 10;
+    }, { timeout: 15000 })
+    .catch(() => {});
 
   const anchorSelector = "a[href*='/product/']:not([href*='ratings=reviews'])";
   const candidates = [anchorSelector, "div.cc-product-card"]; // signal readiness
@@ -807,10 +846,13 @@ async function loadProductsByPagination(
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     try {
       await ensureOnSalePage(page);
+      await waitForSaleHydration(page);
       await humanScrollToBottom(page);
       await waitForDomStable(page);
 
-      const extraction = await extractProductsFromSalePage(page);
+      const extraction = await extractProductsFromSalePage(page, {
+        captureRejects: pageNum === 1,
+      });
       totalTilesFound += extraction.tilesFound || 0;
       const normalized = normalizeProducts(extraction.products);
 
@@ -839,11 +881,27 @@ async function loadProductsByPagination(
         `[PA] Page ${pageNum} tile diagnostics: tilesFound=${extraction.tilesFound}`
       );
 
+      if (pageNum === 1 && extraction.rejectionStats) {
+        const stats = extraction.rejectionStats;
+        console.log(
+          `[PA] Page 1 reject stats: missingHref=${stats.missingHref} missingTitle=${stats.missingTitle} missingSalePrice=${stats.missingSalePrice} missingSku=${stats.missingSku}`
+        );
+        extraction.rejectedSamples.forEach((sample, idx) => {
+          console.log(`[PA] Page 1 rejected sample #${idx + 1}: ${sample}`);
+        });
+      }
+
+      const extractedCount = extraction.products.length;
+
       if (uniqueProducts.length < 3) {
-        zeroGainStreak += 1;
-        if (zeroGainStreak >= 2) {
-          console.log("🛑 Stop pagination: low gain on two consecutive pages");
-          break;
+        if (pageNum === 1 && extractedCount === 0) {
+          console.log("[PA] Skipping low gain evaluation for page 1 with zero extraction");
+        } else {
+          zeroGainStreak += 1;
+          if (zeroGainStreak >= 2) {
+            console.log("🛑 Stop pagination: low gain on two consecutive pages");
+            break;
+          }
         }
       } else {
         zeroGainStreak = 0;
