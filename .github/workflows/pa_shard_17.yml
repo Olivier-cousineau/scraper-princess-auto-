@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: pa-shards
@@ -111,3 +112,11 @@ jobs:
             public/princessauto/**/data.csv
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Trigger orchestrator (next shard)
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh workflow run "orchestrate_pa_shards.yml" --repo "$REPO" --ref "${{ github.ref_name }}"
