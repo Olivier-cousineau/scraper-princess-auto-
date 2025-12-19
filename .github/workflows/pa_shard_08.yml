@@ -74,14 +74,11 @@ jobs:
           # 2) Liquidations par ville
           published="[]"
           if [ -d "outputs/princessauto" ]; then
-            for d in outputs/princessauto/*; do
+            rsync -av --delete outputs/princessauto/ _econoplus/public/princessauto/
+            # Collect published slugs from synced folders containing data.json
+            for d in _econoplus/public/princessauto/*; do
               if [ -d "$d" ] && [ -f "$d/data.json" ]; then
                 slug=$(basename "$d")
-                mkdir -p "_econoplus/public/princessauto/${slug}"
-                cp -f "$d/data.json" "_econoplus/public/princessauto/${slug}/data.json"
-                if [ -f "$d/data.csv" ]; then
-                  cp -f "$d/data.csv" "_econoplus/public/princessauto/${slug}/data.csv"
-                fi
                 # append slug to published list
                 published=$(node -e "const a=${published}; a.push('${slug}'); console.log(JSON.stringify(a));")
               fi
@@ -94,7 +91,7 @@ jobs:
           cd _econoplus
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/princessauto
+          git add public/princessauto/**
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
