@@ -55,6 +55,7 @@ jobs:
             echo "No changes to commit"
           fi
 
+      
       - name: Publish Princess Auto cities + deals to econoplus
         if: always()
         env:
@@ -66,27 +67,10 @@ jobs:
           rm -rf _econoplus
           git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/Olivier-cousineau/econoplus.git _econoplus
 
-          mkdir -p _econoplus/public/princessauto
-
-          # 1) Villes (magasins)
-          cp -f public/princessauto/stores.json _econoplus/public/princessauto/stores.json
-
-          # 2) Liquidations par ville
-          published="[]"
-          if [ -d "outputs/princessauto" ]; then
-            rsync -av --delete outputs/princessauto/ _econoplus/public/princessauto/
-            # Collect published slugs from synced folders containing data.json
-            for d in _econoplus/public/princessauto/*; do
-              if [ -d "$d" ] && [ -f "$d/data.json" ]; then
-                slug=$(basename "$d")
-                # append slug to published list
-                published=$(node -e "const a=${published}; a.push('${slug}'); console.log(JSON.stringify(a));")
-              fi
-            done
-          fi
-
-          # 3) Index (optionnel mais recommandé)
-          node -e "const fs=require('fs'); const path='_econoplus/public/princessauto/index.json'; fs.writeFileSync(path, JSON.stringify({updatedAt: new Date().toISOString(), storesPublished: ${published}}, null, 2));"
+          node scripts/publish_princessauto_to_econoplus.mjs \
+            --stores public/princessauto/stores.json \
+            --outputs outputs/princessauto \
+            --econoplus _econoplus/public/princessauto
 
           cd _econoplus
           git config user.name "github-actions[bot]"
