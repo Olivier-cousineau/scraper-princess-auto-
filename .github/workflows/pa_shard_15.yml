@@ -1,7 +1,12 @@
-name: Scrape Princess Auto - Shard 15/35
+name: Scrape Princess Auto - Shard 15/43
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Scrape Princess Auto - Shard 16/43
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -14,6 +19,7 @@ jobs:
   pa-shard-15:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    if: ${{ github.event_name == 'workflow_dispatch' or github.event_name == 'schedule' or (github.event_name == 'workflow_run' and github.event.workflow_run.conclusion == 'success') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,7 +37,7 @@ jobs:
       - name: Run Princess Auto sale scraper (shard 15)
         env:
           SHARD_INDEX: 15
-          TOTAL_SHARDS: 35
+          TOTAL_SHARDS: 43
           MAX_PAGES: 50
           MAX_RUN_MINUTES: 150
           MAX_STORE_MINUTES: 20
@@ -63,13 +69,13 @@ jobs:
 
           if [ -n "$(git status --porcelain public/princessauto)" ]; then
             git add public/princessauto
-            git commit -m "Update Princess Auto sale shard 15/35"
+            git commit -m "Update Princess Auto sale shard 15/43"
             git push
           else
             echo "No changes to commit"
           fi
 
-      
+
       - name: Publish Princess Auto cities + deals to econoplus
         if: always()
         env:
@@ -81,10 +87,7 @@ jobs:
           rm -rf _econoplus
           git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/Olivier-cousineau/econoplus.git _econoplus
 
-          node scripts/publish_princessauto_to_econoplus.mjs \
-            --stores public/princessauto/stores.json \
-            --outputs public/princessauto \
-            --econoplus _econoplus/public/princessauto
+          node scripts/publish_princessauto_to_econoplus.mjs             --stores public/princessauto/stores.json             --outputs public/princessauto             --econoplus _econoplus/public/princessauto
 
           cd _econoplus
           git config user.name "github-actions[bot]"

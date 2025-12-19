@@ -1,22 +1,19 @@
-name: Scrape Princess Auto - Shard 23/43
+name: Scrape Princess Auto - Shard 43/43
 
 on:
+  schedule:
+    - cron: "0 9 * * MON"
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - Scrape Princess Auto - Shard 24/43
-    types:
-      - completed
 
 permissions:
   contents: write
 
 concurrency:
-  group: pa-shard-23
+  group: pa-shard-43
   cancel-in-progress: false
 
 jobs:
-  pa-shard-23:
+  pa-shard-43:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     if: ${{ github.event_name == 'workflow_dispatch' or github.event_name == 'schedule' or (github.event_name == 'workflow_run' and github.event.workflow_run.conclusion == 'success') }}
@@ -34,9 +31,9 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
 
-      - name: Run Princess Auto sale scraper (shard 23)
+      - name: Run Princess Auto sale scraper (shard 43)
         env:
-          SHARD_INDEX: 23
+          SHARD_INDEX: 43
           TOTAL_SHARDS: 43
           MAX_PAGES: 50
           MAX_RUN_MINUTES: 150
@@ -69,7 +66,7 @@ jobs:
 
           if [ -n "$(git status --porcelain public/princessauto)" ]; then
             git add public/princessauto
-            git commit -m "Update Princess Auto sale shard 23/43"
+            git commit -m "Update Princess Auto sale shard 43/43"
             git push
           else
             echo "No changes to commit"

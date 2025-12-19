@@ -26,8 +26,4 @@ SHARD_TOTAL=1 SHARD_INDEX=0 node scripts/scrape_princessauto_clearance_all_store
 
 ## Workflow GitHub Actions
 
-Un workflow manuel est disponible dans **Actions → Scraper Princess Auto** pour lancer le scraping avec sharding configurable :
-
-1. Clique sur « Run workflow ».
-2. Renseigne `shard_total` (nombre de shards à créer) ; laisse `shard_index` vide pour lancer tous les shards ou fournis un index (0-based) pour n'en exécuter qu'un seul.
-3. Les résultats sont archivés en artefacts sous le nom `outputs-shard-<index>`.
+43 workflows dédiés (`Scrape Princess Auto - Shard XX/43`) sont configurés dans **Actions → Scraper Princess Auto**. Ils s’enchaînent automatiquement chaque lundi à 09:00 UTC en commençant par le shard 43, puis 42, etc. jusqu’au shard 1. Chaque shard peut aussi être lancé manuellement via le bouton « Run workflow » sur son entrée spécifique.
