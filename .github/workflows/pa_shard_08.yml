@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: pa-shard-08
+  group: pa-shards
   cancel-in-progress: false
 
 jobs:

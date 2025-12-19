@@ -1,0 +1,83 @@
+name: Orchestrate Princess Auto shards (35→1)
+
+on:
+  schedule:
+    - cron: "0 20 * * 5"     # exemple: vendredi 15:00 Québec en hiver (UTC-5) => 20:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: pa-orchestrator
+  cancel-in-progress: false
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next shard (35→1)
+        id: calc
+        env:
+          STATE_PATH: public/princessauto/_orchestrator_state.json
+          TOTAL_SHARDS: "35"
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const statePath = process.env.STATE_PATH;
+          const total = parseInt(process.env.TOTAL_SHARDS, 10);
+
+          let nextShard = total; // défaut 35
+          if (fs.existsSync(statePath)) {
+            try {
+              const s = JSON.parse(fs.readFileSync(statePath, "utf8"));
+              if (Number.isInteger(s.nextShard) && s.nextShard >= 1 && s.nextShard <= total) {
+                nextShard = s.nextShard;
+              }
+            } catch (e) {}
+          }
+
+          const workflowFile = `pa_shard_${String(nextShard).padStart(2,"0")}.yml`;
+
+          // calc du prochain : 35→34→...→1→35
+          const newNext = (nextShard === 1) ? total : (nextShard - 1);
+
+          const updated = { nextShard: newNext, updatedAt: new Date().toISOString() };
+          fs.mkdirSync(require("path").dirname(statePath), { recursive: true });
+          fs.writeFileSync(statePath, JSON.stringify(updated, null, 2));
+
+          // outputs
+          console.log(`workflow_file=${workflowFile}`);
+          console.log(`trigger_shard=${nextShard}`);
+          console.log(`next_shard=${newNext}`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `workflow_file=${workflowFile}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `trigger_shard=${nextShard}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `next_shard=${newNext}\n`);
+          NODE
+
+      - name: Trigger shard workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Triggering shard ${{ steps.calc.outputs.trigger_shard }} => ${{ steps.calc.outputs.workflow_file }}"
+          gh workflow run "${{ steps.calc.outputs.workflow_file }}" --repo "$REPO" --ref "${{ github.ref_name }}"
+
+      - name: Commit orchestrator state
+        run: |
+          git add public/princessauto/_orchestrator_state.json
+          git commit -m "PA orchestrator: next shard ${{ steps.calc.outputs.next_shard }}" || echo "Nothing to commit"
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git push origin HEAD:"${{ github.ref_name }}"
