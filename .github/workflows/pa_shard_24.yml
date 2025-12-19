@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   pa-shard-24:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -38,7 +39,7 @@ jobs:
         run: node scripts/scrape_princessauto_clearance_all_stores.mjs
 
       - name: Validate Princess Auto outputs
-        if: always()
+        if: ${{ always() }}
         run: |
           set -e
 
@@ -53,7 +54,7 @@ jobs:
           done
 
       - name: Commit & push Princess Auto data
-        if: always()
+        if: ${{ always() }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -71,7 +72,7 @@ jobs:
 
       
       - name: Publish Princess Auto cities + deals to econoplus
-        if: always()
+        if: ${{ always() }}
         env:
           ECONOPLUS_PAT: ${{ secrets.ECONOPLUS_PAT }}
           ECONOPLUS_REPO: ${{ secrets.ECONOPLUS_REPO }}
@@ -100,7 +101,7 @@ jobs:
           git push
 
       - name: Upload artifacts (debug + outputs)
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: pa-shard-${{ env.SHARD_INDEX }}-${{ github.run_id }}
