@@ -10,7 +10,7 @@
       "slug": "abbotsford-bc",
       "productCount": 0,
       "updatedAt": "2025-12-17T04:56:32.880Z",
-      "dataPath": "outputs/princessauto/abbotsford-bc/data.json"
+      "dataPath": "public/princessauto/abbotsford-bc/data.json"
     },
     {
       "storeId": "2",
@@ -21,7 +21,7 @@
       "slug": "kamloops-bc",
       "productCount": 0,
       "updatedAt": "2025-12-17T04:57:54.392Z",
-      "dataPath": "outputs/princessauto/kamloops-bc/data.json"
+      "dataPath": "public/princessauto/kamloops-bc/data.json"
     }
   ]
 }

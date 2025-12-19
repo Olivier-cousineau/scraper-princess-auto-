@@ -1,11 +1,8 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import { chromium } from "playwright";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, "..");
+const ROOT_DIR = process.cwd();
 const BASE_URL = "https://www.princessauto.com";
 const SALE_BASE_URL = "https://www.princessauto.com/en/category/Sale?page=1";
 const NRPP = parseInt(process.env.NRPP || "50", 10);
@@ -15,7 +12,7 @@ const CONCURRENCY = Number(
   process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
 );
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
-const OUTPUT_ROOT = path.join(ROOT_DIR, "outputs", "princessauto");
+const OUTPUT_ROOT = path.join(ROOT_DIR, "public", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
 let activeBrowser = null;
 
@@ -1506,8 +1503,19 @@ function writeStoreOutput(store, products, storeSynced = true, tilesFound = 0) {
   console.log(`withSkuCount=${withSkuCount}`);
   console.log(`withSalePriceCount=${withSalePriceCount}`);
   console.log(`writtenProducts=${normalizedProducts.length}`);
-  console.log(`wroteCsvPath=${csvFile}`);
-  console.log(`wroteJsonPath=${outputFile}`);
+  console.log(`Saved: public/princessauto/${slug}/data.csv`);
+  console.log(`Saved: public/princessauto/${slug}/data.json`);
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(outputFile, "utf8"));
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      console.error(`❌ Output for ${slug} is empty or invalid at ${outputFile}`);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    console.error(`❌ Failed to read output for ${slug} at ${outputFile}:`, error);
+    process.exitCode = 1;
+  }
 
   return {
     storeName: store.name || store.storeName,

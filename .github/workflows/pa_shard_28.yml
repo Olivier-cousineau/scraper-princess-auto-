@@ -29,7 +29,6 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Run Princess Auto sale scraper (shard 28)
-        continue-on-error: true
         env:
           SHARD_INDEX: 28
           TOTAL_SHARDS: 35
@@ -37,6 +36,21 @@ jobs:
           MAX_RUN_MINUTES: 150
           MAX_STORE_MINUTES: 20
         run: node scripts/scrape_princessauto_clearance_all_stores.mjs
+
+      - name: Validate Princess Auto outputs
+        if: always()
+        run: |
+          set -e
+
+          if ! compgen -G "public/princessauto/*/data.json" > /dev/null; then
+            echo "No data.json found in public/princessauto"
+            exit 1
+          fi
+
+          for file in public/princessauto/*/data.json; do
+            [ -f "$file" ] || continue
+            node -e "const fs=require('fs');const p=process.argv[1];const data=JSON.parse(fs.readFileSync(p));if(!Array.isArray(data)||data.length===0){console.error('Empty data.json:',p);process.exit(1);}" "$file" || exit 1
+          done
 
       - name: Commit & push Princess Auto data
         if: always()
@@ -47,8 +61,8 @@ jobs:
           git fetch origin main
           git reset --hard origin/main
 
-          if [ -n "$(git status --porcelain outputs/princessauto)" ]; then
-            git add outputs/princessauto
+          if [ -n "$(git status --porcelain public/princessauto)" ]; then
+            git add public/princessauto
             git commit -m "Update Princess Auto sale shard 28/35"
             git push
           else
@@ -69,7 +83,7 @@ jobs:
 
           node scripts/publish_princessauto_to_econoplus.mjs \
             --stores public/princessauto/stores.json \
-            --outputs outputs/princessauto \
+            --outputs public/princessauto \
             --econoplus _econoplus/public/princessauto
 
           cd _econoplus
@@ -92,7 +106,7 @@ jobs:
           name: pa-shard-${{ env.SHARD_INDEX }}-${{ github.run_id }}
           path: |
             outputs/debug/**
-            outputs/princessauto/**/data.json
-            outputs/princessauto/**/data.csv
+            public/princessauto/**/data.json
+            public/princessauto/**/data.csv
           if-no-files-found: warn
           retention-days: 7
