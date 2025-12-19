@@ -1,0 +1,27 @@
+{
+  "updatedAt": "2025-12-19T14:42:16.987Z",
+  "stores": [
+    {
+      "storeId": "5",
+      "storeName": "Langley",
+      "city": "Langley",
+      "province": "BC",
+      "address": "20202 66 Avenue, Langley, BC, V2Y 1P3",
+      "slug": "langley-bc",
+      "productCount": 745,
+      "updatedAt": "2025-12-19T14:42:16.787Z",
+      "dataPath": "public/princessauto/langley-bc/data.json"
+    },
+    {
+      "storeId": "6",
+      "storeName": "Nanaimo",
+      "city": "Nanaimo",
+      "province": "BC",
+      "address": "4900 Wellington Road, Nanaimo, BC, V9T 4W1",
+      "slug": "nanaimo-bc",
+      "productCount": 745,
+      "updatedAt": "2025-12-19T14:42:16.943Z",
+      "dataPath": "public/princessauto/nanaimo-bc/data.json"
+    }
+  ]
+}
