@@ -6,7 +6,7 @@ Scripts pour récupérer les soldes Princess Auto. Le script principal scrappe l
 
 ### `scripts/scrape_princessauto_clearance_all_stores.mjs`
 - Utilise Playwright pour charger la page soldes et scroller afin de charger tous les produits.
-- Extraie les tuiles produits (titre, URL, image, prix actuel, ancien prix) et écrit un fichier `data.json` par magasin dans `outputs/princessauto/<slug>/`.
+- Extraie les tuiles produits (titre, URL, image, prix actuel, ancien prix) et écrit un fichier `data.json` par magasin dans `public/princessauto/<slug>/`.
 - Supporte le sharding via les variables d'environnement `SHARD_TOTAL` et `SHARD_INDEX`.
 
 ## Données
