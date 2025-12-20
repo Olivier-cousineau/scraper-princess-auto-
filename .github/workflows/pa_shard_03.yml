@@ -2,6 +2,9 @@ name: Scrape Princess Auto - Shard 03/35
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 5"
+
 
 permissions:
   contents: write
