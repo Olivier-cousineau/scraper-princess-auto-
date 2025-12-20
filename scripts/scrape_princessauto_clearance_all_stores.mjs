@@ -367,7 +367,7 @@ function loadStores() {
 }
 
 function getStoresForThisShard(allStores) {
-  const totalShards = Number(process.env.TOTAL_SHARDS ?? "35");
+  const totalShards = Number(process.env.TOTAL_SHARDS ?? "43");
   const rawShard = Number(process.env.SHARD_INDEX ?? "0");
 
   let shardIndex = rawShard;

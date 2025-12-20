@@ -1,24 +1,22 @@
-name: Scrape Princess Auto - Shard 22/43
+name: Scrape Princess Auto - Shard 36/43
 
 on:
   workflow_dispatch:
   workflow_run:
     workflows:
-      - Scrape Princess Auto - Shard 23/43
+      - Scrape Princess Auto - Shard 37/43
     types:
       - completed
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
-  group: pa-shards
+  group: pa-shard-36
   cancel-in-progress: false
 
 jobs:
-  pa-shard-22:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+  pa-shard-36:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     if: ${{ github.event_name == 'workflow_dispatch' or github.event_name == 'schedule' or (github.event_name == 'workflow_run' and github.event.workflow_run.conclusion == 'success') }}
@@ -36,9 +34,9 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
 
-      - name: Run Princess Auto sale scraper (shard 22)
+      - name: Run Princess Auto sale scraper (shard 36)
         env:
-          SHARD_INDEX: 22
+          SHARD_INDEX: 36
           TOTAL_SHARDS: 43
           MAX_PAGES: 50
           MAX_RUN_MINUTES: 150
@@ -46,7 +44,7 @@ jobs:
         run: node scripts/scrape_princessauto_clearance_all_stores.mjs
 
       - name: Validate Princess Auto outputs
-        if: ${{ always() }}
+        if: always()
         run: |
           set -e
 
@@ -61,7 +59,7 @@ jobs:
           done
 
       - name: Commit & push Princess Auto data
-        if: ${{ always() }}
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -71,7 +69,7 @@ jobs:
 
           if [ -n "$(git status --porcelain public/princessauto)" ]; then
             git add public/princessauto
-            git commit -m "Update Princess Auto sale shard 22/43"
+            git commit -m "Update Princess Auto sale shard 36/43"
             git push
           else
             echo "No changes to commit"
@@ -79,7 +77,7 @@ jobs:
 
 
       - name: Publish Princess Auto cities + deals to econoplus
-        if: ${{ always() }}
+        if: always()
         env:
           ECONOPLUS_PAT: ${{ secrets.ECONOPLUS_PAT }}
           ECONOPLUS_REPO: ${{ secrets.ECONOPLUS_REPO }}
@@ -105,7 +103,7 @@ jobs:
           git push
 
       - name: Upload artifacts (debug + outputs)
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pa-shard-${{ env.SHARD_INDEX }}-${{ github.run_id }}
@@ -115,11 +113,3 @@ jobs:
             public/princessauto/**/data.csv
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Trigger orchestrator (next shard)
-        if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          gh workflow run "orchestrate_pa_shards.yml" --repo "$REPO" --ref "${{ github.ref_name }}"
