@@ -11,6 +11,11 @@ const MAX_PAGES = parseInt(process.env.MAX_PAGES || "40", 10);
 const CONCURRENCY = Number(
   process.env.STORE_CONCURRENCY ?? process.env.PA_CONCURRENCY ?? "2"
 );
+const PER_STORE_TIMEOUT_MINUTES = Number(
+  process.env.PA_STORE_TIMEOUT_MINUTES ??
+    process.env.STORE_TIMEOUT_MINUTES ??
+    "25"
+);
 const STORES_JSON = path.join(ROOT_DIR, "public", "princessauto", "stores.json");
 const OUTPUT_ROOT = path.join(ROOT_DIR, "public", "princessauto");
 const DEBUG_OUTPUT_DIR = path.join(ROOT_DIR, "outputs", "debug");
@@ -1671,16 +1676,35 @@ async function processStore(page, store) {
   }
 }
 
-async function processStoreWithIsolatedContext(browser, store) {
+async function processStoreWithTimeout(browser, store) {
+  const timeoutMs = PER_STORE_TIMEOUT_MINUTES * 60 * 1000;
+  const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
   });
   const page = await context.newPage();
 
+  let timeoutId = null;
+  let timedOut = false;
+
   try {
-    return await processStore(page, store);
+    const timeoutPromise = new Promise((resolve) => {
+      if (!hasTimeout) return;
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        console.warn(
+          `⏱️ Store timeout reached (${PER_STORE_TIMEOUT_MINUTES} minutes) for ${store.slug}. Skipping store and continuing.`
+        );
+        resolve(null);
+      }, timeoutMs);
+    });
+
+    const resultPromise = processStore(page, store);
+    const result = await Promise.race([resultPromise, timeoutPromise]);
+    return { result, timedOut };
   } finally {
-    await context.close();
+    if (timeoutId) clearTimeout(timeoutId);
+    await context.close().catch(() => {});
   }
 }
 
@@ -1722,7 +1746,11 @@ async function main() {
         if (currentIndex >= stores.length) return;
         const store = stores[currentIndex];
 
-        const result = await processStoreWithIsolatedContext(activeBrowser, store);
+        const { result, timedOut } = await processStoreWithTimeout(activeBrowser, store);
+
+        if (timedOut) {
+          continue;
+        }
 
         if (result) {
           indexUpdateQueue = indexUpdateQueue.then(async () => {
@@ -1763,4 +1791,11 @@ async function main() {
   }
 }
 
-main();
+main()
+  .catch((error) => {
+    console.error("❌ Unhandled error in Princess Auto scraper:", error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    process.exit(0);
+  });
