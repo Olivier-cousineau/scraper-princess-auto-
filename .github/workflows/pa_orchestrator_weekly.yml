@@ -1,0 +1,58 @@
+name: "PA Orchestrator Weekly (manual + schedule)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start shard (1-35)"
+        required: false
+        default: 1
+        type: number
+      end:
+        description: "End shard (1-35)"
+        required: false
+        default: 35
+        type: number
+  schedule:
+    - cron: "0 20 * * 5"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency: pa-orchestrator-weekly
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    env:
+      START: ${{ inputs.start || 1 }}
+      END: ${{ inputs.end || 35 }}
+    steps:
+      - name: Print debug context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref_name=${{ github.ref_name }}"
+          echo "repo=${{ github.repository }}"
+          echo "actor=${{ github.actor }}"
+          echo "start=${START}"
+          echo "end=${END}"
+
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh auth status
+
+      - name: Run shards sequentially
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for shard in $(seq "$START" "$END"); do
+            echo "Triggering shard $shard"
+            gh workflow run "pa_shard_runner.yml" --ref "${{ github.ref_name }}" -f shard="$shard"
+            sleep 5
+            run_id=$(gh run list --workflow "pa_shard_runner.yml" --branch "${{ github.ref_name }}" --limit 1 --json databaseId --jq '.[0].databaseId')
+            echo "Waiting for run $run_id (shard $shard)"
+            gh run watch --exit-status "$run_id"
+          done
