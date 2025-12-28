@@ -1,9 +1,15 @@
-name: Orchestrate Princess Auto shards (35→1)
+name: Orchestrate Princess Auto shards (1→35)
 
 on:
   schedule:
     - cron: "0 20 * * 5"     # exemple: vendredi 15:00 Québec en hiver (UTC-5) => 20:00 UTC
   workflow_dispatch:
+    inputs:
+      reset:
+        description: "Reset sequence to shard 01"
+        required: false
+        type: boolean
+        default: false
   workflow_run:
     workflows:
       - Scrape Princess Auto - Shard 01/35
@@ -71,19 +77,22 @@ jobs:
         run: |
           git pull --rebase origin "${{ github.ref_name }}"
 
-      - name: Determine next shard (35→1)
+      - name: Determine next shard (1→35)
         id: calc
         env:
           STATE_PATH: public/princessauto/_orchestrator_state.json
           TOTAL_SHARDS: "35"
+          RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.reset }}
         run: |
           node <<'NODE'
           const fs = require("fs");
+          const path = require("path");
           const statePath = process.env.STATE_PATH;
           const total = parseInt(process.env.TOTAL_SHARDS, 10);
+          const reset = String(process.env.RESET).toLowerCase() === "true";
 
-          let nextShard = total; // défaut 35
-          if (fs.existsSync(statePath)) {
+          let nextShard = 1; // défaut: shard 1
+          if (!reset && fs.existsSync(statePath)) {
             try {
               const s = JSON.parse(fs.readFileSync(statePath, "utf8"));
               if (Number.isInteger(s.nextShard) && s.nextShard >= 1 && s.nextShard <= total) {
@@ -94,11 +103,11 @@ jobs:
 
           const workflowFile = `pa_shard_${String(nextShard).padStart(2,"0")}.yml`;
 
-          // calc du prochain : 35→34→...→1→35
-          const newNext = (nextShard === 1) ? total : (nextShard - 1);
+          // calc du prochain : 01→02→...→35→01
+          const newNext = (nextShard === total) ? 1 : (nextShard + 1);
 
           const updated = { nextShard: newNext, updatedAt: new Date().toISOString() };
-          fs.mkdirSync(require("path").dirname(statePath), { recursive: true });
+          fs.mkdirSync(path.dirname(statePath), { recursive: true });
           fs.writeFileSync(statePath, JSON.stringify(updated, null, 2));
 
           // outputs
