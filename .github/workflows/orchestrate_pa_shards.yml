@@ -4,6 +4,45 @@ on:
   schedule:
     - cron: "0 20 * * 5"     # exemple: vendredi 15:00 Québec en hiver (UTC-5) => 20:00 UTC
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Scrape Princess Auto - Shard 01/35
+      - Scrape Princess Auto - Shard 02/35
+      - Scrape Princess Auto - Shard 03/35
+      - Scrape Princess Auto - Shard 04/35
+      - Scrape Princess Auto - Shard 05/35
+      - Scrape Princess Auto - Shard 06/35
+      - Scrape Princess Auto - Shard 07/35
+      - Scrape Princess Auto - Shard 08/35
+      - Scrape Princess Auto - Shard 09/35
+      - Scrape Princess Auto - Shard 10/35
+      - Scrape Princess Auto - Shard 11/35
+      - Scrape Princess Auto - Shard 12/35
+      - Scrape Princess Auto - Shard 13/35
+      - Scrape Princess Auto - Shard 14/35
+      - Scrape Princess Auto - Shard 15/35
+      - Scrape Princess Auto - Shard 16/35
+      - Scrape Princess Auto - Shard 17/35
+      - Scrape Princess Auto - Shard 18/35
+      - Scrape Princess Auto - Shard 19/35
+      - Scrape Princess Auto - Shard 20/35
+      - Scrape Princess Auto - Shard 21/35
+      - Scrape Princess Auto - Shard 22/35
+      - Scrape Princess Auto - Shard 23/35
+      - Scrape Princess Auto - Shard 24/35
+      - Scrape Princess Auto - Shard 25/35
+      - Scrape Princess Auto - Shard 26/35
+      - Scrape Princess Auto - Shard 27/35
+      - Scrape Princess Auto - Shard 28/35
+      - Scrape Princess Auto - Shard 29/35
+      - Scrape Princess Auto - Shard 30/35
+      - Scrape Princess Auto - Shard 31/35
+      - Scrape Princess Auto - Shard 32/35
+      - Scrape Princess Auto - Shard 33/35
+      - Scrape Princess Auto - Shard 34/35
+      - Scrape Princess Auto - Shard 35/35
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -16,7 +55,7 @@ concurrency:
 jobs:
   orchestrate:
     runs-on: ubuntu-latest
-    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') && (github.event_name != 'workflow_dispatch' || github.actor == 'github-actions[bot]') }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,6 +66,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync branch
+        run: |
+          git pull --rebase origin "${{ github.ref_name }}"
 
       - name: Determine next shard (35→1)
         id: calc
@@ -78,7 +121,7 @@ jobs:
 
       - name: Trigger shard workflow
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           echo "Triggering shard ${{ steps.calc.outputs.trigger_shard }} => ${{ steps.calc.outputs.workflow_file }}"
@@ -88,5 +131,4 @@ jobs:
         run: |
           git add public/princessauto/_orchestrator_state.json
           git commit -m "PA orchestrator: next shard ${{ steps.calc.outputs.next_shard }}" || echo "Nothing to commit"
-          git pull --rebase origin "${{ github.ref_name }}" || true
           git push origin HEAD:"${{ github.ref_name }}"
