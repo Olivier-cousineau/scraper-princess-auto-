@@ -1,0 +1,74 @@
+name: Orchestrate Princess Auto Shards 01-35
+
+on:
+  schedule:
+    - cron: "0 20 * * 5"
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First shard to run (1-35)"
+        required: false
+        default: "1"
+      end:
+        description: "Last shard to run (1-35)"
+        required: false
+        default: "35"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      START_SHARD: ${{ github.event.inputs.start || '1' }}
+      END_SHARD: ${{ github.event.inputs.end || '35' }}
+      REF: ${{ github.ref_name }}
+    steps:
+      - name: Run shards sequentially
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$START_SHARD" =~ ^[0-9]+$ ]] || ! [[ "$END_SHARD" =~ ^[0-9]+$ ]]; then
+            echo "START_SHARD and END_SHARD must be integers."
+            exit 1
+          fi
+
+          if [ "$START_SHARD" -lt 1 ] || [ "$END_SHARD" -gt 35 ]; then
+            echo "Shard range must be between 1 and 35."
+            exit 1
+          fi
+
+          if [ "$END_SHARD" -lt "$START_SHARD" ]; then
+            echo "END_SHARD must be >= START_SHARD."
+            exit 1
+          fi
+
+          for shard in $(seq -w "$START_SHARD" "$END_SHARD"); do
+            workflow="pa_shard_${shard}.yml"
+            echo "Triggering ${workflow} on ref ${REF}..."
+            gh workflow run "$workflow" --ref "$REF"
+
+            run_id=""
+            for attempt in {1..30}; do
+              run_id=$(gh run list --workflow "$workflow" --branch "$REF" --json databaseId --jq '.[0].databaseId')
+              if [ -n "$run_id" ]; then
+                break
+              fi
+              echo "Waiting for run to appear... (attempt ${attempt})"
+              sleep 10
+            done
+
+            if [ -z "$run_id" ]; then
+              echo "Failed to find run ID for ${workflow}."
+              exit 1
+            fi
+
+            echo "Watching run ${run_id} for ${workflow}..."
+            gh run watch "$run_id" --exit-status
+          done
