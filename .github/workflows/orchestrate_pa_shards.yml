@@ -1,112 +1,81 @@
-name: Orchestrate Princess Auto shards (1→35)
+name: Orchestrate Princess Auto shards (1→35 weekly)
 
 on:
   schedule:
-    - cron: "0 20 * * 5"     # exemple: vendredi 15:00 Québec en hiver (UTC-5) => 20:00 UTC
+    - cron: "0 20 * * 5"   # vendredi 20:00 UTC
   workflow_dispatch:
     inputs:
-      reset:
-        description: "Reset sequence to shard 01"
+      start:
+        description: "Start shard (1..35)"
         required: false
-        type: boolean
-        default: false
-  workflow_run:
-    workflows: ["Princess Auto - Shard Runner"]
-    types:
-      - completed
+        default: "1"
+      end:
+        description: "End shard (1..35)"
+        required: false
+        default: "35"
 
 permissions:
-  contents: write
   actions: write
+  contents: read
 
 concurrency:
-  group: pa-orchestrator
+  group: pa-orchestrator-weekly
   cancel-in-progress: false
 
 jobs:
-  orchestrate:
+  run-all:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 360
+
     steps:
-      - name: Checkout
+      - name: Setup
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Sync branch
-        run: |
-          git pull --rebase origin "${{ github.ref_name }}" || true
-
-      - name: Determine next shard (1→35)
-        id: calc
+      - name: Ensure gh is authenticated
+        run: gh auth status
         env:
-          STATE_PATH: public/princessauto/_orchestrator_state.json
-          TOTAL_SHARDS: "35"
-          RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.reset }}
-        run: |
-          node <<'NODE'
-          const fs = require("fs");
-          const path = require("path");
-          const statePath = process.env.STATE_PATH;
-          const total = parseInt(process.env.TOTAL_SHARDS, 10);
-          const reset = String(process.env.RESET).toLowerCase() === "true";
+          GH_TOKEN: ${{ github.token }}
 
-          let nextShard = 1; // défaut: shard 1
-          if (!reset && fs.existsSync(statePath)) {
-            try {
-              const s = JSON.parse(fs.readFileSync(statePath, "utf8"));
-              if (Number.isInteger(s.nextShard) && s.nextShard >= 1 && s.nextShard <= total) {
-                nextShard = s.nextShard;
-              }
-            } catch (e) {}
-          }
-
-          const newNext = (nextShard === total) ? 1 : (nextShard + 1);
-
-          const updated = { nextShard: newNext, updatedAt: new Date().toISOString() };
-          fs.mkdirSync(path.dirname(statePath), { recursive: true });
-          fs.writeFileSync(statePath, JSON.stringify(updated, null, 2));
-
-          console.log(`workflow_file=pa_shard_runner.yml`);
-          console.log(`trigger_shard=${nextShard}`);
-          console.log(`next_shard=${newNext}`);
-
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `workflow_file=pa_shard_runner.yml\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `trigger_shard=${nextShard}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `next_shard=${newNext}\n`);
-          NODE
-
-      - name: Debug orchestrator state
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "workflow_run.name=${{ github.event.workflow_run.name }}"
-            echo "workflow_run.conclusion=${{ github.event.workflow_run.conclusion }}"
-            echo "workflow_run.head_branch=${{ github.event.workflow_run.head_branch }}"
-          fi
-          echo "workflow_file=${{ steps.calc.outputs.workflow_file }}"
-          echo "trigger_shard=${{ steps.calc.outputs.trigger_shard }}"
-          echo "next_shard=${{ steps.calc.outputs.next_shard }}"
-          echo "state file:"
-          cat public/princessauto/_orchestrator_state.json
-
-      - name: Trigger shard workflow
+      - name: Run shards sequentially (1→35)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          START: ${{ inputs.start || '1' }}
+          END: ${{ inputs.end || '35' }}
         run: |
-          echo "Triggering shard ${{ steps.calc.outputs.trigger_shard }} => ${{ steps.calc.outputs.workflow_file }}"
-          gh workflow run "${{ steps.calc.outputs.workflow_file }}" \
-            --repo "$REPO" \
-            --ref "${{ github.ref_name }}" \
-            -f shard="${{ steps.calc.outputs.trigger_shard }}"
+          set -euo pipefail
 
-      - name: Commit orchestrator state
-        run: |
-          git add public/princessauto/_orchestrator_state.json
-          git commit -m "PA orchestrator: next shard ${{ steps.calc.outputs.next_shard }}" || echo "Nothing to commit"
-          git push origin HEAD:"${{ github.ref_name }}"
+          start="$START"
+          end="$END"
+
+          echo "Running shards sequentially: $start → $end on ref=$REF"
+
+          for shard in $(seq "$start" "$end"); do
+            shard2=$(printf "%02d" "$shard")
+            echo "=============================="
+            echo "Trigger shard $shard2"
+            echo "=============================="
+
+            # Trigger the shard runner workflow with input shard
+            run_url=$(gh workflow run "pa_shard_runner.yml" \
+              --repo "$REPO" \
+              --ref "$REF" \
+              -f shard="$shard" \
+              --json url -q .url)
+
+            echo "Triggered: $run_url"
+
+            echo "Waiting for shard $shard2 to complete..."
+            # Wait until last run of this workflow on this branch completes
+            gh run watch --repo "$REPO" --exit-status $(gh run list \
+              --repo "$REPO" \
+              --workflow "pa_shard_runner.yml" \
+              --branch "$REF" \
+              --limit 1 \
+              --json databaseId -q '.[0].databaseId')
+
+            echo "Shard $shard2 completed successfully."
+          done
+
+          echo "All shards completed successfully."
