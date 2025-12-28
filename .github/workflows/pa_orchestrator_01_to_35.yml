@@ -24,8 +24,9 @@ jobs:
     timeout-minutes: 300
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      START_SHARD: ${{ inputs.start || '1' }}
-      END_SHARD: ${{ inputs.end || '35' }}
+      GH_REPO: ${{ github.repository }}
+      START_SHARD: ${{ github.event.inputs.start || '1' }}
+      END_SHARD: ${{ github.event.inputs.end || '35' }}
       REF: ${{ github.ref_name }}
     steps:
       - name: Run shards sequentially
