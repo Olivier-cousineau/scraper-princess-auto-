@@ -25,6 +25,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -75,17 +80,9 @@ jobs:
       - name: Commit shard outputs
         if: ${{ always() && env.SHARD_INDEX != '' }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/princessauto/**
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Princess Auto: shard ${SHARD_INDEX} outputs"
-          git push origin HEAD:"${{ github.ref_name }}"
+          git add -A
+          git commit -m "PA shard ${SHARD_INDEX} publish" || echo "Nothing to commit"
+          git push
 
       - name: Publish Princess Auto cities + deals to econoplus
         if: ${{ always() && env.SHARD_INDEX != '' }}
