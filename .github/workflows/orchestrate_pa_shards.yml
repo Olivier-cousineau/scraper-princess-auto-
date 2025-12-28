@@ -1,81 +1,48 @@
-name: Orchestrate Princess Auto shards (1→35 weekly)
+- name: Run shards sequentially (1→35)
+  env:
+    GH_TOKEN: ${{ github.token }}
+    REPO: ${{ github.repository }}
+    REF: ${{ github.ref_name }}
+    START: ${{ inputs.start || '1' }}
+    END: ${{ inputs.end || '35' }}
+  run: |
+    set -euo pipefail
 
-on:
-  schedule:
-    - cron: "0 20 * * 5"   # vendredi 20:00 UTC
-  workflow_dispatch:
-    inputs:
-      start:
-        description: "Start shard (1..35)"
-        required: false
-        default: "1"
-      end:
-        description: "End shard (1..35)"
-        required: false
-        default: "35"
+    start="$START"
+    end="$END"
 
-permissions:
-  actions: write
-  contents: read
+    echo "Running shards sequentially: $start → $end on ref=$REF"
 
-concurrency:
-  group: pa-orchestrator-weekly
-  cancel-in-progress: false
+    for shard in $(seq "$start" "$end"); do
+      shard2=$(printf "%02d" "$shard")
+      echo "=============================="
+      echo "Trigger shard $shard2"
+      echo "=============================="
 
-jobs:
-  run-all:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+      # 1) Trigger the workflow (no --json/-q here)
+      gh workflow run "pa_shard_runner.yml" \
+        --repo "$REPO" \
+        --ref "$REF" \
+        -f shard="$shard"
 
-    steps:
-      - name: Setup
-        uses: actions/checkout@v4
+      # 2) Give GitHub a moment to register the run
+      sleep 5
 
-      - name: Ensure gh is authenticated
-        run: gh auth status
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # 3) Get the latest run id for this workflow on this branch
+      run_id=$(gh run list \
+        --repo "$REPO" \
+        --workflow "pa_shard_runner.yml" \
+        --branch "$REF" \
+        --limit 1 \
+        --json databaseId \
+        --jq '.[0].databaseId')
 
-      - name: Run shards sequentially (1→35)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref_name }}
-          START: ${{ inputs.start || '1' }}
-          END: ${{ inputs.end || '35' }}
-        run: |
-          set -euo pipefail
+      echo "Watching run_id=$run_id for shard $shard2..."
 
-          start="$START"
-          end="$END"
+      # 4) Wait for completion and fail if it fails
+      gh run watch --repo "$REPO" --exit-status "$run_id"
 
-          echo "Running shards sequentially: $start → $end on ref=$REF"
+      echo "Shard $shard2 completed successfully."
+    done
 
-          for shard in $(seq "$start" "$end"); do
-            shard2=$(printf "%02d" "$shard")
-            echo "=============================="
-            echo "Trigger shard $shard2"
-            echo "=============================="
-
-            # Trigger the shard runner workflow with input shard
-            run_url=$(gh workflow run "pa_shard_runner.yml" \
-              --repo "$REPO" \
-              --ref "$REF" \
-              -f shard="$shard" \
-              --json url -q .url)
-
-            echo "Triggered: $run_url"
-
-            echo "Waiting for shard $shard2 to complete..."
-            # Wait until last run of this workflow on this branch completes
-            gh run watch --repo "$REPO" --exit-status $(gh run list \
-              --repo "$REPO" \
-              --workflow "pa_shard_runner.yml" \
-              --branch "$REF" \
-              --limit 1 \
-              --json databaseId -q '.[0].databaseId')
-
-            echo "Shard $shard2 completed successfully."
-          done
-
-          echo "All shards completed successfully."
+    echo "All shards completed successfully."
