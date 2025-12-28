@@ -61,13 +61,18 @@ async function main() {
 
     if (!(await fileExists(outputDataPath))) continue;
 
-    const outputData = await loadJson(outputDataPath, {});
-    const products = Array.isArray(outputData.products) ? outputData.products : [];
-    const updatedAt = outputData.updatedAt ?? new Date().toISOString();
+    const outputData = await loadJson(outputDataPath, []);
+    const normalizedOutput = Array.isArray(outputData)
+      ? { products: outputData }
+      : outputData ?? {};
+    const products = Array.isArray(normalizedOutput.products)
+      ? normalizedOutput.products
+      : [];
+    const updatedAt = normalizedOutput.updatedAt ?? new Date().toISOString();
     const storeMetadata = storesBySlug.get(slug) ?? {};
 
     const merged = {
-      ...outputData,
+      ...normalizedOutput,
       ...storeMetadata,
       slug,
       updatedAt,
