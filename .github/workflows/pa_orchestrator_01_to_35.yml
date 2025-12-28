@@ -52,20 +52,24 @@ jobs:
           for shard in $(seq -w "$START_SHARD" "$END_SHARD"); do
             workflow="pa_shard_${shard}.yml"
             echo "Triggering ${workflow} on ref ${REF}..."
+            trigger_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             gh workflow run "$workflow" --ref "$REF"
 
             run_id=""
             for attempt in {1..30}; do
-              run_id=$(gh run list --workflow "$workflow" --branch "$REF" --json databaseId --jq '.[0].databaseId')
+              run_id=$(gh run list --workflow "$workflow" --branch "$REF" --limit 10 \
+                --json databaseId,createdAt,status,conclusion \
+                --jq "[.[] | select(.createdAt >= \"$trigger_time\")][0].databaseId")
               if [ -n "$run_id" ]; then
                 break
               fi
               echo "Waiting for run to appear... (attempt ${attempt})"
-              sleep 10
+              sleep 2
             done
 
             if [ -z "$run_id" ]; then
               echo "Failed to find run ID for ${workflow}."
+              gh run list --workflow "$workflow" --branch "$REF" --limit 5
               exit 1
             fi
 
