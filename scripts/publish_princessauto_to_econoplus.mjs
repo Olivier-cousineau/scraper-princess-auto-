@@ -39,9 +39,15 @@ async function main() {
   const resolvedStoresPath = path.resolve(storesPath);
   const resolvedOutputsDir = path.resolve(outputsDir);
   const resolvedEconoplusDir = path.resolve(econoplusDir);
+  const resolvedIndexPath = path.join(resolvedOutputsDir, "index.json");
 
   const stores = await loadJson(resolvedStoresPath, []);
   const storesBySlug = new Map(stores.map((store) => [store.slug, store]));
+  const indexData = await loadJson(resolvedIndexPath, null);
+  const indexedSlugs = Array.isArray(indexData?.stores)
+    ? indexData.stores.map((entry) => entry?.slug).filter(Boolean)
+    : [];
+  const allowedSlugs = new Set(indexedSlugs);
 
   await fs.mkdir(resolvedEconoplusDir, { recursive: true });
   await fs.cp(resolvedStoresPath, path.join(resolvedEconoplusDir, "stores.json"));
@@ -56,6 +62,9 @@ async function main() {
     if (!entry.isDirectory()) continue;
 
     const slug = entry.name;
+    if (allowedSlugs.size > 0 && !allowedSlugs.has(slug)) {
+      continue;
+    }
     const outputDataPath = path.join(resolvedOutputsDir, slug, "data.json");
     const outputCsvPath = path.join(resolvedOutputsDir, slug, "data.csv");
 
