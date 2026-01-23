@@ -2,7 +2,7 @@ name: Orchestrate Princess Auto Shards 01-35
 
 on:
   schedule:
-    - cron: "0 20 * * 5"
+    - cron: "0 20 * * 2"
   workflow_dispatch:
     inputs:
       start:
@@ -29,8 +29,22 @@ jobs:
       END_SHARD: ${{ github.event.inputs.end || '35' }}
       REF: ${{ github.ref_name }}
     steps:
+      - name: Decide whether to run this week (every 14 days)
+        id: check_week
+        shell: bash
+        run: |
+          set -euo pipefail
+          week_number=$(date -u +%V)
+          if (( week_number % 2 == 0 )); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Proceeding on even ISO week ${week_number}."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping run on odd ISO week ${week_number} to enforce 14-day schedule."
+          fi
       - name: Run shards sequentially
         shell: bash
+        if: steps.check_week.outputs.run == 'true'
         run: |
           set -euo pipefail
 
