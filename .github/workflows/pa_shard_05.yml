@@ -60,13 +60,13 @@ jobs:
       - name: Publish Princess Auto cities + deals to econoplus
         if: ${{ always() }}
         env:
-          ECONOPLUS_PAT: ${{ secrets.ECONOPLUS_PAT }}
+          ECONOPLUS_TOKEN: ${{ secrets.ECONOPLUS }}
           ECONOPLUS_REPO: ${{ secrets.ECONOPLUS_REPO }}
         run: |
           set -e
 
           rm -rf _econoplus
-          git clone https://x-access-token:${ECONOPLUS_PAT}@github.com/Olivier-cousineau/econoplus.git _econoplus
+          git clone https://x-access-token:${ECONOPLUS_TOKEN}@github.com/Olivier-cousineau/econoplus.git _econoplus
 
           node scripts/publish_princessauto_to_econoplus.mjs \
             --stores public/princessauto/stores.json \
