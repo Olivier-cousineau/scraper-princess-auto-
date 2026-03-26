@@ -1,25 +1,25 @@
 #!/usr/bin/env node
-/**
- * Upsert scraped deals into Supabase.
- *
- * Usage:
- *   node scripts/upsert_to_supabase.mjs <retailer_slug> <json_glob_or_file> [--store-external-id=<id>]
- *
- * Examples:
- *   node scripts/upsert_to_supabase.mjs bestbuy outputs/bestbuy/clearance.json
- *   node scripts/upsert_to_supabase.mjs canadiantire "public/canadiantire/*/data.json"
- *   node scripts/upsert_to_supabase.mjs canac "public/canac/*.json"
- *   node scripts/upsert_to_supabase.mjs ikea "public/ikea/*/data.json"
- *   node scripts/upsert_to_supabase.mjs sportinglife "public/sportinglife/*.json" --exclude=stores.json
- *   node scripts/upsert_to_supabase.mjs princessauto "public/princessauto/*/data.json"
- *
- * Environment:
- *   SUPABASE_URL            - Supabase project URL
- *   SUPABASE_SERVICE_KEY    - Supabase service role key
- *
- * This script is designed to be copied into each scraper repo and run as a
- * GitHub Actions step after the publish-to-econoplus step.
- */
+//
+// Upsert scraped deals into Supabase.
+//
+// Usage:
+//   node scripts/upsert_to_supabase.mjs <retailer_slug> <json_glob_or_file>
+//
+// Examples:
+//   node scripts/upsert_to_supabase.mjs bestbuy outputs/bestbuy/clearance.json
+//   node scripts/upsert_to_supabase.mjs canadiantire 'public/canadiantire/*/data.json'
+//   node scripts/upsert_to_supabase.mjs canac 'public/canac/*.json'
+//   node scripts/upsert_to_supabase.mjs ikea 'public/ikea/*/data.json'
+//   node scripts/upsert_to_supabase.mjs sportinglife 'public/sportinglife/*.json' --exclude=stores.json
+//   node scripts/upsert_to_supabase.mjs princessauto 'public/princessauto/*/data.json'
+//
+// Environment:
+//   SUPABASE_URL            - Supabase project URL
+//   SUPABASE_SERVICE_KEY    - Supabase service role key
+//
+// This script is designed to be copied into each scraper repo and run as a
+// GitHub Actions step after the publish-to-econoplus step.
+//
 
 import fs from "node:fs";
 import path from "node:path";
@@ -140,7 +140,7 @@ const extractors = {
   },
 
   sportinglife(item, filePath) {
-    const productId = item.link?.match(/\/(\d+)/)?.[1] ?? item.link ?? item.name;
+    const productId = item.link?.match(/\/(\d{5,})/)?.[1] ?? item.link ?? item.name;
     return {
       externalId: productId,
       title: item.name,
@@ -159,17 +159,18 @@ const extractors = {
   },
 
   princessauto(item, _filePath) {
-    const productId = item.url?.match(/\/(\d+)\/?/)?.[1] ?? item.url ?? item.name;
+    const url = item.productUrl ?? item.url;
+    const productId = item.sku ?? url?.match(/\/(\d+)\/?/)?.[1] ?? url ?? item.name;
     return {
       externalId: productId,
       title: item.name,
-      url: item.url ? (item.url.startsWith("http") ? item.url : `https://www.princessauto.com${item.url}`) : null,
+      url: url ? (url.startsWith("http") ? url : `https://www.princessauto.com${url}`) : null,
       imageUrl: item.imageUrl ?? null,
-      sku: null,
+      sku: item.sku ?? null,
       brand: item.brand ?? null,
       category: null,
-      salePrice: parsePrice(item.currentPrice),
-      regularPrice: parsePrice(item.originalPrice),
+      salePrice: parsePrice(item.priceSale ?? item.currentPrice),
+      regularPrice: parsePrice(item.priceRegular ?? item.originalPrice),
       discountPct: parsePrice(item.discountPercent),
       badges: null,
       availability: item.availability ?? null,
@@ -227,9 +228,9 @@ function extractItems(data, retailerSlug, filePath) {
   // Some retailers wrap items in an object
   if (Array.isArray(data)) return { items: data, storeExternalId: null };
 
-  // Sporting Life: { store: {...}, products: [...] }
+  // Sporting Life / Princess Auto / IKEA: { products: [...] }
   if (data.products && Array.isArray(data.products)) {
-    const storeKey = data.store?.storeKey ?? data.storeId ?? data.slug ?? null;
+    const storeKey = data.store?.storeKey ?? data.store?.slug ?? data.slug ?? data.storeId?.toString() ?? null;
     return { items: data.products, storeExternalId: storeKey };
   }
 
@@ -335,11 +336,18 @@ async function resolveStoreId(retailerId, externalId, name) {
 }
 
 async function upsertBatch(retailerId, products, deals) {
-  // 1. Upsert products
-  if (products.length > 0) {
+  // 1. Deduplicate products by external_id (keep last occurrence)
+  const deduped = new Map();
+  for (const p of products) {
+    deduped.set(p.external_id, p);
+  }
+  const uniqueProducts = [...deduped.values()];
+
+  // 2. Upsert products
+  if (uniqueProducts.length > 0) {
     const { error: prodErr } = await supabase
       .from("products")
-      .upsert(products, { onConflict: "retailer_id,external_id", ignoreDuplicates: false });
+      .upsert(uniqueProducts, { onConflict: "retailer_id,external_id", ignoreDuplicates: false });
     if (prodErr) {
       console.error(`Product upsert error: ${prodErr.message}`);
       return { productsUpserted: 0, dealsUpserted: 0, errors: 1 };
@@ -364,15 +372,16 @@ async function upsertBatch(retailerId, products, deals) {
     }
   }
 
-  // 3. Build deal rows with resolved product_id
-  const dealRows = deals
-    .map((d) => {
-      const productId = productIdMap.get(d._external_id);
-      if (!productId || !d.store_id) return null;
-      const { _external_id, ...rest } = d;
-      return { ...rest, product_id: productId };
-    })
-    .filter(Boolean);
+  // 3. Build deal rows with resolved product_id, deduplicate by (product_id, store_id)
+  const dealDeduped = new Map();
+  for (const d of deals) {
+    const productId = productIdMap.get(d._external_id);
+    if (!productId || !d.store_id) continue;
+    const { _external_id, ...rest } = d;
+    const key = `${productId}:${d.store_id}`;
+    dealDeduped.set(key, { ...rest, product_id: productId });
+  }
+  const dealRows = [...dealDeduped.values()];
 
   // 4. Upsert deals
   let dealsUpserted = 0;
